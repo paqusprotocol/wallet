@@ -64,14 +64,53 @@ cargo run -- send \
   --submit
 ```
 
-By default the wallet uses node RPC at `127.0.0.1:6666`. Set
-`PAQUS_RPC_ADDR` once if your node uses another RPC address:
+By default the wallet uses node RPC at
+`[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666`. Set `PAQUS_RPC_ADDR` once if
+your node uses another RPC address:
 
 ```bash
-export PAQUS_RPC_ADDR=127.0.0.1:7777
+export PAQUS_RPC_ADDR='[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666'
 ```
 
 You can still override one command with `--rpc <host:port>`.
+
+## Remote RPC
+
+The wallet does not need to run on the same machine as the node. Point it at any
+reachable Paqus node RPC endpoint with `PAQUS_RPC_ADDR`:
+
+```bash
+PAQUS_RPC_ADDR='<host-or-ip>:6666' cargo run
+```
+
+For IPv6 addresses, wrap the address in brackets:
+
+```bash
+PAQUS_RPC_ADDR='[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666' cargo run
+```
+
+The node must listen on an address reachable by the wallet. On a server, bind RPC
+to all IPv6 interfaces with:
+
+```bash
+paqus-node node run ./data/paqus --rpc-listen '[::]:6666'
+```
+
+Check the server listener:
+
+```bash
+ss -ltnp | grep 6666
+```
+
+Expected output should show `*:6666` or `[::]:6666`.
+
+Test RPC from the wallet machine:
+
+```bash
+curl 'http://[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666/health'
+```
+
+Keep public RPC access limited when possible.
 
 ## Commands
 

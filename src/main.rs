@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_RPC_ADDR: &str = "127.0.0.1:6666";
+const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666";
 const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
 const DEFAULT_TRANSACTION_FEE: u32 = 1;
@@ -291,7 +291,12 @@ fn print_status(value: &serde_json::Value) {
     print_field("Protocol", value_text(value.get("protocol_version")));
     print_field("Height", value_text(value.get("height")));
     print_field("Tip", short_value(value.get("tip_hash")));
-    print_field("Peers", value_text(value.get("peers")));
+    print_field(
+        "Known",
+        value_text(value.get("known_peers").or(value.get("peers"))),
+    );
+    print_field("Outbound", value_text(value.get("outbound_peers")));
+    print_field("Inbound", value_text(value.get("inbound_peers")));
     print_field("Mining", bool_text(value.get("mining")));
 }
 
@@ -1174,7 +1179,7 @@ Usage:
 
 Defaults:
   Wallet path: wallet.json
-  RPC address: $PAQUS_RPC_ADDR or 127.0.0.1:6666
+  RPC address: $PAQUS_RPC_ADDR or [2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666
 "
     );
 }
