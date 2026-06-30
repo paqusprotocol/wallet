@@ -344,19 +344,40 @@ fn print_latest_blocks(value: &serde_json::Value) {
         return;
     };
     println!("Latest Blocks ({})", blocks.len());
-    for block in blocks {
+    let tip_height = blocks
+        .iter()
+        .filter_map(|block| block.get("height").and_then(serde_json::Value::as_u64))
+        .max();
+    for (index, block) in blocks.iter().enumerate() {
+        let previous_timestamp = blocks
+            .get(index + 1)
+            .and_then(|previous_block| previous_block.get("timestamp"))
+            .and_then(serde_json::Value::as_u64);
         println!();
-        print_block(block);
+        print_block_with_context(block, tip_height, previous_timestamp);
     }
 }
 
 fn print_block(value: &serde_json::Value) {
+    print_block_with_context(value, None, None);
+}
+
+fn print_block_with_context(
+    value: &serde_json::Value,
+    tip_height: Option<u64>,
+    previous_timestamp: Option<u64>,
+) {
     println!("Block #{}", value_text(value.get("height")));
     print_field("Hash", short_value(value.get("hash")));
     print_field("Previous", short_value(value.get("previous_hash")));
     print_field("Miner", short_value(value.get("miner_address")));
     print_field("Difficulty", value_text(value.get("difficulty")));
-    print_field("Nonce", value_text(value.get("nonce")));
+    print_field("Confirmations", confirmations_text(value, tip_height));
+    print_field("Age", block_age_text(value));
+    print_field("Target", target_block_time_text(value));
+    print_field("Block Mined", block_mined_text(value, previous_timestamp));
+    print_field("Value Moved", value_moved_text(value));
+    print_field("Block Nonce", value_text(value.get("nonce")));
     print_field("Tx count", value_text(value.get("tx_count")));
     print_field("Size", format!("{} bytes", value_text(value.get("size"))));
     if let Some(coinbase) = value.get("coinbase").and_then(serde_json::Value::as_object) {
@@ -436,7 +457,7 @@ fn print_tx_fields(value: &serde_json::Value) {
 }
 
 fn print_field(label: &str, value: impl std::fmt::Display) {
-    println!("{label:<10} : {value}");
+    println!("{label:<13} : {value}");
 }
 
 fn print_pretty_json(value: &serde_json::Value) {
@@ -451,6 +472,111 @@ fn value_text(value: Option<&serde_json::Value>) -> String {
         Some(serde_json::Value::Null) | None => "none".to_string(),
         Some(serde_json::Value::String(value)) => value.clone(),
         Some(value) => value.to_string(),
+    }
+}
+
+fn block_age_text(value: &serde_json::Value) -> String {
+    if let Some(age_secs) = value.get("age_secs").and_then(serde_json::Value::as_u64) {
+        return format!("{} ago", format_duration(age_secs));
+    }
+
+    let Some(timestamp) = value.get("timestamp").and_then(serde_json::Value::as_u64) else {
+        return "unknown".to_string();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(timestamp);
+    format!("{} ago", format_duration(now.saturating_sub(timestamp)))
+}
+
+fn confirmations_text(value: &serde_json::Value, tip_height: Option<u64>) -> String {
+    if let Some(confirmations) = value
+        .get("confirmations")
+        .and_then(serde_json::Value::as_u64)
+    {
+        return confirmations.to_string();
+    }
+
+    let Some(height) = value.get("height").and_then(serde_json::Value::as_u64) else {
+        return "unknown".to_string();
+    };
+    tip_height
+        .map(|tip| tip.saturating_sub(height).saturating_add(1).to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn target_block_time_text(value: &serde_json::Value) -> String {
+    let target = value
+        .get("target_block_time_secs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(300);
+    format_duration(target)
+}
+
+fn block_mined_text(value: &serde_json::Value, previous_timestamp: Option<u64>) -> String {
+    let seconds = value
+        .get("block_time_secs")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            let timestamp = value.get("timestamp").and_then(serde_json::Value::as_u64)?;
+            Some(timestamp.saturating_sub(previous_timestamp?))
+        });
+    let Some(seconds) = seconds else {
+        return "unknown".to_string();
+    };
+    format_duration(seconds)
+}
+
+fn value_moved_text(value: &serde_json::Value) -> String {
+    if let Some(value_moved) = value.get("value_moved").and_then(serde_json::Value::as_u64) {
+        return value_moved.to_string();
+    }
+
+    value
+        .get("transactions")
+        .and_then(serde_json::Value::as_array)
+        .map(|transactions| {
+            transactions
+                .iter()
+                .filter_map(|transaction| {
+                    transaction
+                        .get("amount")
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .sum::<u64>()
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn format_duration(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds} sec"),
+        60..=3_599 => {
+            let minutes = seconds / 60;
+            if minutes == 1 {
+                "1 minute".to_string()
+            } else {
+                format!("{minutes} minutes")
+            }
+        }
+        3_600..=86_399 => {
+            let hours = seconds / 3_600;
+            if hours == 1 {
+                "1 hour".to_string()
+            } else {
+                format!("{hours} hours")
+            }
+        }
+        _ => {
+            let days = seconds / 86_400;
+            if days == 1 {
+                "1 day".to_string()
+            } else {
+                format!("{days} days")
+            }
+        }
     }
 }
 
