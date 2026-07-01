@@ -529,10 +529,9 @@ fn print_transactions(value: Option<&serde_json::Value>) {
         return;
     };
     println!();
-    println!("Transactions ({})", transactions.len());
-    for (index, tx) in transactions.iter().enumerate() {
+    println!("Transactions ({}, newest first)", transactions.len());
+    for tx in transactions {
         println!();
-        println!("Tx #{}", index + 1);
         print_tx_fields(tx);
     }
 }
@@ -544,6 +543,8 @@ fn print_tx_fields(value: &serde_json::Value) {
     print_amount_field("Amount", value.get("amount"));
     print_amount_field("Fee", value.get("fee"));
     print_field("Nonce", value_text(value.get("nonce")));
+    print_field("Age", tx_age_text(value));
+    print_field("Timestamp", value_text(value.get("timestamp")));
     print_field("Height", value_text(value.get("block_height")));
     print_field("Block", short_value(value.get("block_hash")));
     print_field("Status", str_value(value.get("status")));
@@ -618,6 +619,21 @@ fn format_grouped_u64(value: u64) -> String {
 }
 
 fn block_age_text(value: &serde_json::Value) -> String {
+    if let Some(age_secs) = value.get("age_secs").and_then(serde_json::Value::as_u64) {
+        return format!("{} ago", format_duration(age_secs));
+    }
+
+    let Some(timestamp) = value.get("timestamp").and_then(serde_json::Value::as_u64) else {
+        return "unknown".to_string();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(timestamp);
+    format!("{} ago", format_duration(now.saturating_sub(timestamp)))
+}
+
+fn tx_age_text(value: &serde_json::Value) -> String {
     if let Some(age_secs) = value.get("age_secs").and_then(serde_json::Value::as_u64) {
         return format!("{} ago", format_duration(age_secs));
     }
