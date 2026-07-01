@@ -85,7 +85,7 @@ cargo run -- send \
 ```
 
 By default the wallet uses node RPC at
-`[2404:8000:1044:4d8:822b:f9ff:fee2:365]:6666`. Set `PAQUS_RPC_ADDR` once if
+`[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666`. Set `PAQUS_RPC_ADDR` once if
 your node uses another RPC address:
 
 ```bash
@@ -106,7 +106,7 @@ PAQUS_RPC_ADDR='<host-or-ip>:6666' cargo run
 For IPv6 addresses, wrap the address in brackets:
 
 ```bash
-PAQUS_RPC_ADDR='[2404:8000:1044:4d8:822b:f9ff:fee2:365]:6666' cargo run
+PAQUS_RPC_ADDR='[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666' cargo run
 ```
 
 The node must listen on an address reachable by the wallet. On a server, bind RPC
