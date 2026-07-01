@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:822b:f9ff:fee2:365]:6666";
+const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666";
 const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
 const DEFAULT_TRANSACTION_FEE: u32 = 1;
