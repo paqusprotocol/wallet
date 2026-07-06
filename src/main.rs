@@ -2,8 +2,8 @@ use paqus::{
     block::Nonce,
     consensus::supply::{Amount, XPQ},
     crypto::{
-        Address, PublicKey, SecretKey, address_from_public_key, address_to_string,
-        derive_public_key, generate_keypair, sign,
+        Address, PublicKey, SecretKey, address_from_public_key, address_from_string,
+        address_to_string, derive_public_key, generate_keypair, sign,
     },
     ledger::BLOCK_REWARD_MATURITY,
     transaction::{SignedTransaction, Transaction},
@@ -1387,7 +1387,7 @@ fn load_wallet(path: &str) -> Result<Wallet, String> {
         .map_err(|error| format!("failed to read wallet file {path}: {error}"))?;
     let wallet: WalletFile = serde_json::from_str(&contents)
         .map_err(|error| format!("failed to parse wallet file {path}: {error}"))?;
-    let address = parse_address_hex(&wallet.address)?;
+    let address = parse_address_string(&wallet.address)?;
     let secret_key = parse_secret_key(Some(&wallet.secret_key))?;
     let wallet = Wallet::from_secret_key(secret_key);
     if wallet.address != address {
@@ -1413,9 +1413,13 @@ fn parse_secret_key(value: Option<&String>) -> Result<SecretKey, String> {
 
 fn parse_address(value: Option<&String>) -> Result<Address, String> {
     let Some(value) = value else {
-        return Err("missing address hex".to_string());
+        return Err("missing address".to_string());
     };
-    parse_address_hex(value)
+    parse_address_string(value)
+}
+
+fn parse_address_string(value: &str) -> Result<Address, String> {
+    address_from_string(value).or_else(|_| parse_address_hex(value))
 }
 
 fn parse_address_hex(value: &str) -> Result<Address, String> {
@@ -1670,13 +1674,13 @@ Usage:
   paqus-wallet menu
   paqus-wallet new [wallet-path] [--show-secret]
   paqus-wallet address <secret-key-hex>
-  paqus-wallet balance [address-hex] [--wallet path] [--rpc host:port]
+  paqus-wallet balance [address] [--wallet path] [--rpc host:port]
   paqus-wallet stats [--rpc host:port]
-  paqus-wallet address-stats [address-hex] [--wallet path] [--rpc host:port]
+  paqus-wallet address-stats [address] [--wallet path] [--rpc host:port]
   paqus-wallet hashrate [--rpc host:port]
-  paqus-wallet pay <address-hex> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
-  paqus-wallet send <address-hex> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
-  paqus-wallet send [--wallet path] --to address-hex --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
+  paqus-wallet pay <address> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
+  paqus-wallet send <address> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+  paqus-wallet send [--wallet path] --to <address> --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
 
 Defaults:
   Wallet path: wallet.json

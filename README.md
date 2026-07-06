@@ -58,7 +58,7 @@ cargo run -- hashrate
 Send a transaction:
 
 ```bash
-cargo run -- send <recipient-address-hex> 10 --fee 0.01
+cargo run -- send <address> 10 --fee 0.01
 ```
 
 `10` is `10.00 XPQ`, and `--fee 0.01` is `0.01 XPQ`. If `--fee` is omitted,
@@ -69,7 +69,7 @@ Print signed transaction hex without broadcasting:
 
 ```bash
 cargo run -- send \
-  --to <recipient-address-hex> \
+  --to <address> \
   --amount 10 \
   --fee 0.01
 ```
@@ -78,7 +78,7 @@ Broadcast the advanced form:
 
 ```bash
 cargo run -- send \
-  --to <recipient-address-hex> \
+  --to <address> \
   --amount 10 \
   --fee 0.01 \
   --submit
@@ -139,17 +139,20 @@ paqus-wallet
 paqus-wallet menu
 paqus-wallet new [wallet-path] [--show-secret]
 paqus-wallet address <secret-key-hex>
-paqus-wallet balance [address-hex] [--wallet path] [--rpc host:port]
+paqus-wallet balance [address] [--wallet path] [--rpc host:port]
 paqus-wallet stats [--rpc host:port]
-paqus-wallet address-stats [address-hex] [--wallet path] [--rpc host:port]
+paqus-wallet address-stats [address] [--wallet path] [--rpc host:port]
 paqus-wallet hashrate [--rpc host:port]
-paqus-wallet pay <address-hex> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
-paqus-wallet send <address-hex> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
-paqus-wallet send [--wallet path] --to address-hex --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
+paqus-wallet pay <address> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
+paqus-wallet send <address> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+paqus-wallet send [--wallet path] --to <address> --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
 ```
 
 Commands use `wallet.json` by default. Pass `--wallet <path>` only when you want
 another wallet file.
+
+Addresses are normally displayed as uppercase `PX1...` wallet addresses.
+Legacy 20-byte hex addresses are still accepted for older scripts.
 
 Wallet files contain `secret_key`. Do not commit or share them.
 
@@ -167,7 +170,7 @@ The menu can query these node RPC endpoints without typing `curl`:
 /blocks/<height>
 /blocks/hash/<block-hash>
 /tx/<tx-hash>
-/address/<address-hex>
+/address/<address>
 /accounts
 /mempool
 ```
