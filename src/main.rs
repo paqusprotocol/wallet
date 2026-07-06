@@ -1,10 +1,12 @@
 use paqus::{
+    block::Nonce,
+    consensus::supply::{Amount, XPQ},
     crypto::{
-        address_from_public_key, address_to_string, derive_public_key, generate_keypair, sign,
+        Address, PublicKey, SecretKey, address_from_public_key, address_to_string,
+        derive_public_key, generate_keypair, sign,
     },
-    params::{BLOCK_REWARD_MATURITY, XPQ},
+    ledger::BLOCK_REWARD_MATURITY,
     transaction::{SignedTransaction, Transaction},
-    types::{Address, Amount, Nonce, PublicKey, SecretKey},
 };
 use serde::Deserialize;
 use std::env;
@@ -17,11 +19,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666";
 const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const DEFAULT_TRANSACTION_FEE: u32 = 1;
+const DEFAULT_TRANSACTION_FEE: u64 = 1;
 const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.01";
 const RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Wallet {
     address: Address,
     public_key: PublicKey,
@@ -1462,14 +1464,14 @@ fn parse_xpq_amount(value: &str) -> Result<Amount, String> {
     let fractional_units = match fractional {
         Some("") | None => 0u64,
         Some(value) => {
-            if value.len() > 2 {
-                return Err("XPQ supports at most 2 decimal places".to_string());
+            if value.len() > 8 {
+                return Err("XPQ supports at most 8 decimal places".to_string());
             }
             if !value.chars().all(|character| character.is_ascii_digit()) {
                 return Err("fractional XPQ part must contain digits only".to_string());
             }
             let mut padded = value.to_string();
-            while padded.len() < 2 {
+            while padded.len() < 8 {
                 padded.push('0');
             }
             padded
@@ -1479,10 +1481,9 @@ fn parse_xpq_amount(value: &str) -> Result<Amount, String> {
     };
 
     let units = whole_units
-        .checked_mul(XPQ as u64)
+        .checked_mul(XPQ)
         .and_then(|units| units.checked_add(fractional_units))
         .ok_or_else(|| "amount is too large".to_string())?;
-    let units = u32::try_from(units).map_err(|_| "amount exceeds protocol limit".to_string())?;
     Ok(Amount(units))
 }
 
