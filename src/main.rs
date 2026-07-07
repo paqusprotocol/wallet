@@ -1,6 +1,6 @@
 use paqus::{
     block::Nonce,
-    consensus::supply::{Amount, XPQ},
+    consensus::supply::{Amount, DECIMALS, XPQ},
     crypto::{
         Address, PublicKey, SecretKey, address_from_public_key, address_from_string,
         address_to_string, derive_public_key, generate_keypair, sign,
@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666";
 const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const DEFAULT_TRANSACTION_FEE: u64 = 1;
+const DEFAULT_TRANSACTION_FEE: u64 = XPQ / 100;
 const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.01";
 const RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -368,12 +368,9 @@ fn print_chain_stats(value: &serde_json::Value) {
         duration_value_text(value.get("target_block_time_secs")),
     );
     println!();
-    print_amount_field("Target supply", value.get("target_supply"));
     print_amount_field("Current supply", value.get("current_supply"));
     print_amount_field("Genesis premine", value.get("genesis_premine"));
     print_amount_field("Mined supply", value.get("mined_supply"));
-    print_amount_field("Max mined", value.get("max_mined_supply"));
-    print_amount_field("Remaining", value.get("remaining_mined_supply"));
     println!();
     print_amount_field("Coinbase total", value.get("total_coinbase_rewards"));
     print_amount_field("Fees collected", value.get("total_fees_collected"));
@@ -603,9 +600,13 @@ fn amount_units_text(value: &str) -> String {
 }
 
 fn format_xpq(units: u64) -> String {
-    let whole = units / XPQ as u64;
-    let fractional = units % XPQ as u64;
-    format!("{}.{fractional:02} XPQ", format_grouped_u64(whole))
+    let whole = units / XPQ;
+    let fractional = units % XPQ;
+    format!(
+        "{}.{fractional:0width$} XPQ",
+        format_grouped_u64(whole),
+        width = DECIMALS as usize
+    )
 }
 
 fn format_grouped_u64(value: u64) -> String {
@@ -1687,4 +1688,15 @@ Defaults:
   RPC address: $PAQUS_RPC_ADDR or [2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666
 "
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_xpq_with_protocol_decimals() {
+        assert_eq!(format_xpq(XPQ / 100), "0.010000 XPQ");
+        assert_eq!(format_xpq(50 * XPQ + XPQ / 100), "50.010000 XPQ");
+    }
 }
