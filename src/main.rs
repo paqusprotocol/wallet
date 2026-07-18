@@ -28,15 +28,15 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666";
+const DEFAULT_RPC_ADDR: &str = "127.0.0.1:6666";
 const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
 const WALLET_PIN_ENV: &str = "PAQUS_WALLET_PIN";
 const WALLET_VERSION: u8 = 1;
 const WALLET_SALT_LEN: usize = 16;
 const WALLET_NONCE_LEN: usize = 24;
-const DEFAULT_TRANSACTION_FEE: u64 = XPQ / 100_000_000;
-const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.001";
+const DEFAULT_TRANSACTION_FEE: u64 = XPQ / 100_000;
+const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.00001";
 const RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
@@ -266,7 +266,11 @@ fn menu_send_coin() -> Result<bool, String> {
     let Some(amount) = prompt_back("Amount XPQ")? else {
         return Ok(false);
     };
-    let Some(fee) = prompt_default_back("Fee XPQ", DEFAULT_TRANSACTION_FEE_XPQ)? else {
+    let Some(fee) = prompt_default_back(
+        "Fee XPQ (default dihitung 1 paqus/virtual-byte)",
+        DEFAULT_TRANSACTION_FEE_XPQ,
+    )?
+    else {
         return Ok(false);
     };
     let Some(wallet_path) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
@@ -1814,11 +1818,26 @@ fn submit_wallet_transaction(
 ) -> Result<(), String> {
     let wallet = load_wallet(wallet_path)?;
     let nonce = nonce.unwrap_or(resolve_wallet_nonce(&wallet.address, rpc_addr)?);
-    let transaction =
-        Transaction::new_at(wallet.address, to, amount, fee, nonce, unix_timestamp()?);
-    let signed = wallet
+    let timestamp = unix_timestamp()?;
+    let transaction = Transaction::new_at(wallet.address, to, amount, fee, nonce, timestamp);
+    let mut signed = wallet
         .sign_transaction(transaction)
         .map_err(|error| format!("failed to sign transaction: {error}"))?;
+    // The existing default value is only a CLI sentinel. Unless --fee overrides it,
+    // sign once to measure vsize, then use exactly 1 paqus per virtual byte.
+    if fee.0 == DEFAULT_TRANSACTION_FEE {
+        let fee = Amount(signed.virtual_size() as u64);
+        signed = wallet
+            .sign_transaction(Transaction::new_at(
+                wallet.address,
+                to,
+                amount,
+                fee,
+                nonce,
+                timestamp,
+            ))
+            .map_err(|error| format!("failed to sign transaction: {error}"))?;
+    }
     let tx_hex = signed_transaction_to_hex(&signed)?;
 
     if submit {
