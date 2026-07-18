@@ -2,4 +2,8 @@
 wallet.json
 receiver.json
 *.wallet.json
+*wallet*.json
+PX*.json
 *.log
+paqus.cdx.json
+*.cdx.json

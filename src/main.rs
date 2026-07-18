@@ -1,3 +1,8 @@
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
+};
 use paqus::{
     block::Nonce,
     consensus::supply::{Amount, DECIMALS, XPQ},
@@ -5,22 +10,33 @@ use paqus::{
         Address, PublicKey, SecretKey, address_from_public_key, address_from_string,
         address_to_string, derive_public_key, generate_keypair, sign,
     },
-    ledger::BLOCK_REWARD_MATURITY,
-    transaction::{SignedTransaction, Transaction},
+    ecash::{
+        CashCoinFile, DepositCashMetadata, WithdrawCashMetadata, cash_coin_commitment,
+        decode_cash_coin_file, encode_cash_coin_file,
+    },
+    ledger::{BLOCK_REWARD_MATURITY, ECASH_WITHDRAW_MATURITY},
+    state::CashCoinId,
+    transaction::{EcashTransaction, SignedEcashTransaction, SignedTransaction, Transaction},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::env;
-use std::fs;
-use std::io::{self, ErrorKind, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 const DEFAULT_RPC_ADDR: &str = "[2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666";
 const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
-const DEFAULT_TRANSACTION_FEE: u64 = XPQ / 100;
-const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.01";
+const WALLET_PIN_ENV: &str = "PAQUS_WALLET_PIN";
+const WALLET_VERSION: u8 = 1;
+const WALLET_SALT_LEN: usize = 16;
+const WALLET_NONCE_LEN: usize = 24;
+const DEFAULT_TRANSACTION_FEE: u64 = XPQ / 100_000_000;
+const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.001";
 const RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
@@ -61,6 +77,18 @@ impl Wallet {
             .map_err(|error| format!("signed transaction failed validation: {error}"))?;
         Ok(signed)
     }
+
+    fn sign_ecash_transaction(
+        &self,
+        transaction: EcashTransaction,
+    ) -> Result<SignedEcashTransaction, String> {
+        let signature = sign(&self.secret_key, &transaction.signing_bytes());
+        let signed = SignedEcashTransaction::new(transaction, self.public_key, signature);
+        signed
+            .validate_signed()
+            .map_err(|error| format!("signed eCash transaction failed validation: {error}"))?;
+        Ok(signed)
+    }
 }
 
 fn main() -> ExitCode {
@@ -81,10 +109,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         Some("-V") | Some("--version") | Some("version") => {
-            println!("paqus-wallet {}", env!("CARGO_PKG_VERSION"));
+            println!("wallet-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some("new") => wallet_new(&args[1..]),
+        Some("migrate") => wallet_migrate(&args[1..]),
         Some("address") => wallet_address(&args[1..]),
         Some("balance") => wallet_balance(&args[1..]),
         Some("stats") | Some("tracking") => wallet_global_stats(&args[1..]),
@@ -92,6 +121,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("hashrate") => wallet_hashrate(&args[1..]),
         Some("pay") => wallet_pay(&args[1..]),
         Some("send") => wallet_send(&args[1..]),
+        Some("pool-payout") => wallet_pool_payout(&args[1..]),
+        Some("cash") | Some("ecash") => wallet_cash(&args[1..]),
         Some(command) => Err(format!("unknown wallet command `{command}`. Try --help.")),
     }
 }
@@ -151,8 +182,7 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
             let Some(wallet_path) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
                 return Ok(false);
             };
-            let wallet = load_wallet(&wallet_path)?;
-            println!("{}", wallet.wallet_address());
+            println!("{}", address_to_string(&load_wallet_address(&wallet_path)?));
             return Ok(true);
         }
         "3" => {
@@ -161,8 +191,11 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
                 return Ok(false);
             };
             let rpc_addr = default_rpc_addr();
-            let wallet = load_wallet(&wallet_path)?;
-            print_rpc_get(&rpc_addr, &format!("/balance/{}", wallet.wallet_address()))?;
+            let address = load_wallet_address(&wallet_path)?;
+            print_rpc_get(
+                &rpc_addr,
+                &format!("/balance/{}", address_to_string(&address)),
+            )?;
             return Ok(true);
         }
         "4" => {
@@ -792,37 +825,46 @@ fn short_text(value: &str) -> String {
 
 fn wallet_new(args: &[String]) -> Result<(), String> {
     let show_secret = args.iter().any(|arg| arg == "--show-secret");
-    let output_path = args.iter().find(|arg| !arg.starts_with('-'));
+    let output_path = args
+        .iter()
+        .find(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
+        .unwrap_or(DEFAULT_WALLET_PATH);
     let wallet = Wallet::generate();
 
     let address_str = wallet.wallet_address().to_string();
     let public_key_hex = hex::encode(wallet.public_key.0);
     let secret_key_hex = hex::encode(wallet.secret_key.0);
 
-    if let Some(path) = output_path {
-        let json_data = serde_json::json!({
-            "address": address_str,
-            "public_key": public_key_hex,
-            "secret_key": secret_key_hex,
-        });
-        let json_str = serde_json::to_string_pretty(&json_data)
-            .map_err(|error| format!("failed to serialize wallet: {error}"))?;
-        fs::write(path, json_str)
-            .map_err(|error| format!("failed to write wallet file `{path}`: {error}"))?;
-        println!("Wallet successfully saved to `{path}`");
-        println!("address: {address_str}");
-        if show_secret {
-            println!("secret_key: {secret_key_hex}");
-        }
+    let pin = new_wallet_pin()?;
+    save_encrypted_wallet(output_path, &wallet, &pin)?;
+    println!("Encrypted wallet successfully saved to `{output_path}`");
+    println!("address: {address_str}");
+    println!("public_key: {public_key_hex}");
+    if show_secret {
+        println!("secret_key: {secret_key_hex}");
     } else {
-        println!("address: {address_str}");
-        println!("public_key: {public_key_hex}");
-        if show_secret {
-            println!("secret_key: {secret_key_hex}");
-        } else {
-            println!("secret_key: hidden (rerun with --show-secret to print it)");
-        }
+        println!("secret_key: encrypted (rerun with --show-secret to print it)");
     }
+    Ok(())
+}
+
+fn wallet_migrate(args: &[String]) -> Result<(), String> {
+    let source = args.first().ok_or_else(|| {
+        "usage: wallet-cli migrate <plaintext-wallet> [encrypted-wallet]".to_string()
+    })?;
+    let destination = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| format!("{source}.encrypted.wallet.json"));
+    if args.len() > 2 {
+        return Err("usage: wallet-cli migrate <plaintext-wallet> [encrypted-wallet]".to_string());
+    }
+    let wallet = load_legacy_wallet(source)?;
+    let pin = new_wallet_pin()?;
+    save_encrypted_wallet(&destination, &wallet, &pin)?;
+    println!("Encrypted wallet saved to `{destination}`");
+    println!("The plaintext source was not deleted; remove it after verifying the new wallet.");
     Ok(())
 }
 
@@ -866,7 +908,7 @@ fn wallet_balance(args: &[String]) -> Result<(), String> {
 
     let address = match address {
         Some(address) => address,
-        None => load_wallet(&wallet_path)?.address,
+        None => load_wallet_address(&wallet_path)?,
     };
 
     println!(
@@ -940,7 +982,7 @@ fn wallet_address_stats(args: &[String]) -> Result<(), String> {
 
     let address = match address {
         Some(address) => address,
-        None => load_wallet(&wallet_path)?.address,
+        None => load_wallet_address(&wallet_path)?,
     };
 
     print_wallet_stats(&rpc_addr, &address)
@@ -1101,8 +1143,10 @@ struct WalletStats {
 
 impl WalletStats {
     fn from_response(response: &AddressRpcResponse) -> Self {
-        let mut stats = Self::default();
-        stats.mined_blocks = response.mined_blocks.len() as u64;
+        let mut stats = Self {
+            mined_blocks: response.mined_blocks.len() as u64,
+            ..Self::default()
+        };
         for block in &response.mined_blocks {
             stats.mined_total = stats.mined_total.saturating_add(block.total);
             stats.mining_fees = stats.mining_fees.saturating_add(block.fees);
@@ -1241,6 +1285,472 @@ fn wallet_send(args: &[String]) -> Result<(), String> {
     submit_wallet_transaction(&wallet_path, to, amount, fee, nonce, &rpc_addr, submit)
 }
 
+#[derive(Debug, Deserialize)]
+struct PoolAccountingRound {
+    pool_address: String,
+    height: u64,
+    block_hash: String,
+    maturity_height: u64,
+    gross_reward: u64,
+    payouts: Vec<PoolWorkerPayout>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoolWorkerPayout {
+    worker: String,
+    address: String,
+    amount: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PoolPayoutReceipt {
+    round_block_hash: String,
+    round_height: u64,
+    worker: String,
+    address: String,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+    tx_hash: String,
+    submitted_at_height: u64,
+}
+
+fn wallet_pool_payout(args: &[String]) -> Result<(), String> {
+    let mut ledger = "pool-accounting.jsonl".to_string();
+    let mut receipts = "pool-payout-receipts.jsonl".to_string();
+    let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
+    let mut rpc_addr = default_rpc_addr();
+    let mut fee = Amount(DEFAULT_TRANSACTION_FEE);
+    let mut execute = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--ledger" => {
+                index += 1;
+                ledger = required_option(args, index, "--ledger")?;
+            }
+            "--receipts" => {
+                index += 1;
+                receipts = required_option(args, index, "--receipts")?;
+            }
+            "--wallet" => {
+                index += 1;
+                wallet_path = required_option(args, index, "--wallet")?;
+            }
+            "--rpc" | "--rpc-addr" => {
+                index += 1;
+                rpc_addr = required_option(args, index, "--rpc")?;
+            }
+            "--fee" => {
+                index += 1;
+                fee = parse_amount(args.get(index), "--fee")?;
+            }
+            "--execute" => execute = true,
+            value => return Err(format!("unknown pool-payout option `{value}`")),
+        }
+        index += 1;
+    }
+
+    let height = status_value(&rpc_addr)?
+        .get("height")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("rpc status is missing height")?;
+    let rounds = read_json_lines::<PoolAccountingRound>(&ledger)?;
+    let prior_receipts = if std::path::Path::new(&receipts).exists() {
+        read_json_lines::<PoolPayoutReceipt>(&receipts)?
+    } else {
+        Vec::new()
+    };
+    let paid = prior_receipts
+        .iter()
+        .map(receipt_key)
+        .collect::<HashSet<_>>();
+    let wallet_address = address_to_string(&load_wallet_address(&wallet_path)?);
+    let mut pending = Vec::new();
+    for round in rounds
+        .iter()
+        .filter(|round| round.maturity_height <= height)
+    {
+        if round.pool_address != wallet_address {
+            return Err(format!(
+                "round {} belongs to pool {}, but wallet address is {}",
+                round.block_hash, round.pool_address, wallet_address
+            ));
+        }
+        let payout_total = round
+            .payouts
+            .iter()
+            .try_fold(0u64, |total, payout| total.checked_add(payout.amount))
+            .ok_or("round payout total overflow")?;
+        let fee_count = round
+            .payouts
+            .iter()
+            .filter(|payout| payout.amount > 0)
+            .count() as u64;
+        let required_fees = fee.0.checked_mul(fee_count).ok_or("payout fee overflow")?;
+        let reserve = round.gross_reward.saturating_sub(payout_total);
+        if required_fees > reserve {
+            return Err(format!(
+                "round {} fee reserve is insufficient: need {}, available {} base units",
+                round.block_hash, required_fees, reserve
+            ));
+        }
+        for payout in &round.payouts {
+            if payout.amount > 0 && !paid.contains(&payout_key(round, payout)) {
+                let address = parse_address_string(&payout.address).map_err(|error| {
+                    format!(
+                        "invalid payout address for worker {}: {error}",
+                        payout.worker
+                    )
+                })?;
+                pending.push((round, payout, address));
+            }
+        }
+    }
+
+    if !execute {
+        println!(
+            "{}",
+            serde_json::json!({
+                "execute": false,
+                "height": height,
+                "mature_unpaid_payouts": pending.len(),
+                "amount": pending.iter().map(|(_, payout, _)| payout.amount).sum::<u64>(),
+                "fees": fee.0.saturating_mul(pending.len() as u64),
+                "hint": "review this preview, then repeat with --execute"
+            })
+        );
+        return Ok(());
+    }
+
+    let wallet = load_wallet(&wallet_path)?;
+    let mut nonce = resolve_wallet_nonce(&wallet.address, &rpc_addr)?;
+    for (round, payout, address) in pending {
+        let transaction = Transaction::new_at(
+            wallet.address,
+            address,
+            Amount(payout.amount),
+            fee,
+            nonce,
+            unix_timestamp()?,
+        );
+        let signed = wallet.sign_transaction(transaction)?;
+        let tx_hash = hex::encode(signed.hash().0);
+        let body = format!("{{\"tx\":\"{}\"}}", signed_transaction_to_hex(&signed)?);
+        let response = http_post_json(&rpc_addr, "/tx", &body)?;
+        let accepted = serde_json::from_str::<serde_json::Value>(&response)
+            .ok()
+            .and_then(|value| value.get("accepted").and_then(serde_json::Value::as_bool));
+        if accepted != Some(true) {
+            return Err(format!(
+                "node rejected payout for {}: {response}",
+                payout.worker
+            ));
+        }
+        append_payout_receipt(
+            &receipts,
+            &PoolPayoutReceipt {
+                round_block_hash: round.block_hash.clone(),
+                round_height: round.height,
+                worker: payout.worker.clone(),
+                address: payout.address.clone(),
+                amount: payout.amount,
+                fee: fee.0,
+                nonce: nonce.0,
+                tx_hash,
+                submitted_at_height: height,
+            },
+        )?;
+        nonce = Nonce(nonce.0.checked_add(1).ok_or("wallet nonce overflow")?);
+    }
+    println!(
+        "{{\"accepted\":true,\"height\":{height},\"next_nonce\":{}}}",
+        nonce.0
+    );
+    Ok(())
+}
+
+fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &str) -> Result<Vec<T>, String> {
+    let file = fs::File::open(path).map_err(|error| format!("failed to open {path}: {error}"))?;
+    BufReader::new(file)
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            result => Some((index, result)),
+        })
+        .map(|(index, line)| {
+            let line = line.map_err(|error| format!("failed to read {path}: {error}"))?;
+            serde_json::from_str(&line)
+                .map_err(|error| format!("invalid JSON in {path} line {}: {error}", index + 1))
+        })
+        .collect()
+}
+
+fn payout_key(round: &PoolAccountingRound, payout: &PoolWorkerPayout) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        round.block_hash, payout.worker, payout.address, payout.amount
+    )
+}
+
+fn receipt_key(receipt: &PoolPayoutReceipt) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        receipt.round_block_hash, receipt.worker, receipt.address, receipt.amount
+    )
+}
+
+fn append_payout_receipt(path: &str, receipt: &PoolPayoutReceipt) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("open receipt file: {error}"))?;
+    serde_json::to_writer(&mut file, receipt).map_err(|error| error.to_string())?;
+    file.write_all(b"\n").map_err(|error| error.to_string())?;
+    file.sync_data().map_err(|error| error.to_string())
+}
+
+fn wallet_cash(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("inspect") => {
+            let path = args
+                .get(1)
+                .ok_or_else(|| "usage: cash inspect <coin.XPQ>".to_string())?;
+            let file = load_cash_coin_file(path)?;
+            println!(
+                "{{\"version\":{},\"coin_id\":\"{}\",\"denomination\":{},\"file\":\"{}\"}}",
+                file.version,
+                hex::encode(file.coin_id),
+                file.denomination.xpq(),
+                path
+            );
+            Ok(())
+        }
+        Some("withdraw") => wallet_cash_withdraw(&args[1..]),
+        Some("deposit") => wallet_cash_deposit(&args[1..]),
+        Some(command) => Err(format!(
+            "unknown cash command `{command}`; use `cash withdraw`, `cash inspect`, or `cash deposit`"
+        )),
+        None => Err("usage: cash <inspect|deposit> ...".to_string()),
+    }
+}
+
+fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
+    let requested_amount = parse_amount(args.first(), "cash amount")?;
+    let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
+    let mut rpc_addr = default_rpc_addr();
+    let mut output_dir = "./cash".to_string();
+    let mut fee = Amount(DEFAULT_TRANSACTION_FEE);
+    let mut nonce = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--wallet" => {
+                index += 1;
+                wallet_path = required_option(args, index, "--wallet")?;
+            }
+            "--rpc" | "--rpc-addr" => {
+                index += 1;
+                rpc_addr = required_option(args, index, "--rpc")?;
+            }
+            "--out" | "--output-dir" => {
+                index += 1;
+                output_dir = required_option(args, index, "--out")?;
+            }
+            "--fee" => {
+                index += 1;
+                fee = parse_amount(args.get(index), "--fee")?;
+            }
+            "--nonce" => {
+                index += 1;
+                nonce = Some(parse_nonce(args.get(index))?);
+            }
+            value => return Err(format!("unknown cash withdraw option `{value}`")),
+        }
+        index += 1;
+    }
+
+    let plan = WithdrawCashMetadata::plan_automatic(requested_amount)
+        .map_err(|error| format!("cash amount cannot be withdrawn: {error}"))?;
+    let mut secrets = Vec::with_capacity(plan.denominations.len());
+    let mut commitments = Vec::with_capacity(plan.denominations.len());
+    for _ in &plan.denominations {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret)
+            .map_err(|error| format!("secure random generation failed: {error}"))?;
+        commitments.push(cash_coin_commitment(&secret));
+        secrets.push(secret);
+    }
+    let metadata = WithdrawCashMetadata::from_automatic_plan(&plan, &commitments)
+        .map_err(|error| format!("failed to build withdraw outputs: {error}"))?;
+    let wallet = load_wallet(&wallet_path)?;
+    let nonce = nonce.unwrap_or(resolve_wallet_nonce(&wallet.address, &rpc_addr)?);
+    let transaction = EcashTransaction::withdraw(
+        wallet.address,
+        plan.cash_amount,
+        fee,
+        nonce,
+        metadata.clone(),
+    )
+    .with_timestamp(unix_timestamp()?);
+    let withdraw_hash = transaction.hash();
+    let signed = wallet.sign_ecash_transaction(transaction)?;
+
+    fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("failed to create cash output directory {output_dir}: {error}"))?;
+    let mut pending_files = Vec::with_capacity(metadata.outputs.len());
+    for (output, secret) in metadata.outputs.iter().zip(secrets) {
+        let cash_file = CashCoinFile::new(withdraw_hash, output, secret)
+            .map_err(|error| format!("failed to create cash file: {error}"))?;
+        let file_name = CashCoinId(cash_file.coin_id).file_name(output.denomination);
+        let final_path = std::path::Path::new(&output_dir).join(file_name);
+        let pending_path = final_path.with_extension("XPQ.pending");
+        write_new_synced_file(
+            &pending_path,
+            &encode_cash_coin_file(&cash_file).map_err(|error| {
+                format!(
+                    "failed to encode cash file {}: {error}",
+                    final_path.display()
+                )
+            })?,
+        )?;
+        pending_files.push((pending_path, final_path));
+    }
+
+    let body = format!("{{\"tx\":\"{}\"}}", hex::encode(signed.to_bytes()));
+    let response = http_post_json(&rpc_addr, "/ecash/tx", &body)?;
+    let accepted = serde_json::from_str::<serde_json::Value>(&response)
+        .ok()
+        .and_then(|value| value.get("accepted").and_then(serde_json::Value::as_bool))
+        == Some(true);
+    if !accepted {
+        return Err(format!(
+            "node rejected cash withdraw; recovery files remain as .XPQ.pending: {response}"
+        ));
+    }
+    for (pending_path, final_path) in &pending_files {
+        if final_path.exists() {
+            return Err(format!(
+                "cash file already exists; retained recovery file {}",
+                pending_path.display()
+            ));
+        }
+        fs::rename(pending_path, final_path).map_err(|error| {
+            format!(
+                "withdraw accepted but failed to finalize {}: {error}; keep the .pending file",
+                final_path.display()
+            )
+        })?;
+    }
+
+    println!(
+        "{{\"accepted\":true,\"hash\":\"{}\",\"cash_amount\":{},\"remainder\":{},\"coins\":{},\"maturity_blocks\":{},\"output_dir\":\"{}\"}}",
+        hex::encode(withdraw_hash.0),
+        plan.cash_amount.0,
+        plan.remainder.0,
+        pending_files.len(),
+        ECASH_WITHDRAW_MATURITY,
+        output_dir
+    );
+    Ok(())
+}
+
+fn required_option(args: &[String], index: usize, flag: &str) -> Result<String, String> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| format!("missing value for {flag}"))
+}
+
+fn write_new_synced_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("failed to sync {}: {error}", path.display()))
+}
+
+fn wallet_cash_deposit(args: &[String]) -> Result<(), String> {
+    let coin_path = args
+        .first()
+        .filter(|value| !value.starts_with('-'))
+        .ok_or_else(|| "usage: cash deposit <coin.XPQ> --to <address>".to_string())?
+        .clone();
+    let mut wallet_path = DEFAULT_WALLET_PATH.to_string();
+    let mut rpc_addr = default_rpc_addr();
+    let mut recipient = None;
+    let mut fee = Amount(DEFAULT_TRANSACTION_FEE);
+    let mut nonce = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--to" => {
+                index += 1;
+                recipient = Some(parse_address(args.get(index))?);
+            }
+            "--wallet" => {
+                index += 1;
+                wallet_path = args
+                    .get(index)
+                    .ok_or_else(|| "missing value for --wallet".to_string())?
+                    .clone();
+            }
+            "--rpc" | "--rpc-addr" => {
+                index += 1;
+                rpc_addr = args
+                    .get(index)
+                    .ok_or_else(|| "missing value for --rpc".to_string())?
+                    .clone();
+            }
+            "--fee" => {
+                index += 1;
+                fee = parse_amount(args.get(index), "--fee")?;
+            }
+            "--nonce" => {
+                index += 1;
+                nonce = Some(parse_nonce(args.get(index))?);
+            }
+            value => return Err(format!("unknown cash deposit option `{value}`")),
+        }
+        index += 1;
+    }
+
+    let recipient = recipient.ok_or_else(|| "missing --to address".to_string())?;
+    let wallet = load_wallet(&wallet_path)?;
+    let nonce = nonce.unwrap_or(resolve_wallet_nonce(&wallet.address, &rpc_addr)?);
+    let file = load_cash_coin_file(&coin_path)?;
+    let metadata = DepositCashMetadata::new(&[file], recipient)
+        .map_err(|error| format!("failed to authorize cash coin: {error}"))?;
+    let transaction = EcashTransaction::deposit(wallet.address, recipient, fee, nonce, metadata)
+        .with_timestamp(unix_timestamp()?);
+    let signed = wallet.sign_ecash_transaction(transaction)?;
+    let body = format!("{{\"tx\":\"{}\"}}", hex::encode(signed.to_bytes()));
+    let response = http_post_json(&rpc_addr, "/ecash/tx", &body)?;
+    println!("{response}");
+    Ok(())
+}
+
+fn load_cash_coin_file(path: &str) -> Result<CashCoinFile, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("failed to read cash file {path}: {error}"))?;
+    decode_cash_coin_file(&bytes).map_err(|error| format!("invalid cash file {path}: {error}"))
+}
+
 fn wallet_send_short(args: &[String]) -> Result<(), String> {
     let to = parse_address(args.first())?;
     let amount = parse_amount(args.get(1), "amount")?;
@@ -1347,6 +1857,17 @@ fn resolve_wallet_nonce(address: &Address, rpc_addr: &str) -> Result<Nonce, Stri
         .into_iter()
         .filter_map(|transaction| (transaction.from == address_hex).then_some(transaction.nonce))
         .collect::<Vec<_>>();
+    let ecash_body = http_get(rpc_addr, "/ecash/mempool")?;
+    let ecash_mempool: EcashMempoolRpcResponse = serde_json::from_str(&ecash_body)
+        .map_err(|error| format!("failed to parse eCash mempool rpc response: {error}"))?;
+    pending_nonces.extend(
+        ecash_mempool
+            .transactions
+            .into_iter()
+            .filter_map(|transaction| {
+                (transaction.signer == address_hex).then_some(transaction.nonce)
+            }),
+    );
     pending_nonces.sort_unstable();
     pending_nonces.dedup();
 
@@ -1378,15 +1899,67 @@ struct MempoolTxRpcResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct WalletFile {
+struct EcashMempoolRpcResponse {
+    transactions: Vec<EcashMempoolTxRpcResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EcashMempoolTxRpcResponse {
+    signer: String,
+    nonce: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyWalletFile {
     address: String,
     secret_key: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct EncryptedWalletFile {
+    version: u8,
+    address: String,
+    public_key: String,
+    kdf: String,
+    salt: String,
+    nonce: String,
+    ciphertext: String,
+}
+
 fn load_wallet(path: &str) -> Result<Wallet, String> {
+    let contents =
+        fs::read(path).map_err(|error| format!("failed to read wallet file {path}: {error}"))?;
+    if let Ok(encrypted) = serde_json::from_slice::<EncryptedWalletFile>(&contents) {
+        let pin = existing_wallet_pin()?;
+        return decrypt_wallet(encrypted, &pin);
+    }
+    Err(format!(
+        "refusing legacy plaintext wallet `{path}`; migrate it with `wallet-cli migrate {path}`"
+    ))
+}
+
+fn load_wallet_address(path: &str) -> Result<Address, String> {
+    let contents =
+        fs::read(path).map_err(|error| format!("failed to read wallet file {path}: {error}"))?;
+    if let Ok(encrypted) = serde_json::from_slice::<EncryptedWalletFile>(&contents) {
+        if encrypted.version != WALLET_VERSION || encrypted.kdf != "argon2id" {
+            return Err("unsupported wallet format".to_string());
+        }
+        return parse_address_string(&encrypted.address);
+    }
+    Err(format!(
+        "refusing legacy plaintext wallet `{path}`; migrate it with `wallet-cli migrate {path}`"
+    ))
+}
+
+fn load_legacy_wallet(path: &str) -> Result<Wallet, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("failed to read wallet file {path}: {error}"))?;
-    let wallet: WalletFile = serde_json::from_str(&contents)
+    load_legacy_wallet_bytes(path, contents.as_bytes())
+}
+
+fn load_legacy_wallet_bytes(path: &str, contents: &[u8]) -> Result<Wallet, String> {
+    let wallet: LegacyWalletFile = serde_json::from_slice(contents)
         .map_err(|error| format!("failed to parse wallet file {path}: {error}"))?;
     let address = parse_address_string(&wallet.address)?;
     let secret_key = parse_secret_key(Some(&wallet.secret_key))?;
@@ -1395,6 +1968,119 @@ fn load_wallet(path: &str) -> Result<Wallet, String> {
         return Err("wallet address does not match secret key".to_string());
     }
     Ok(wallet)
+}
+
+fn save_encrypted_wallet(path: &str, wallet: &Wallet, pin: &str) -> Result<(), String> {
+    validate_wallet_pin(pin)?;
+    let mut salt = [0u8; WALLET_SALT_LEN];
+    let mut nonce = [0u8; WALLET_NONCE_LEN];
+    getrandom::fill(&mut salt)
+        .map_err(|error| format!("secure random generation failed: {error}"))?;
+    getrandom::fill(&mut nonce)
+        .map_err(|error| format!("secure random generation failed: {error}"))?;
+    let key = derive_wallet_key(pin, &salt)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+        .map_err(|_| "invalid encryption key".to_string())?;
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce), wallet.secret_key.0.as_slice())
+        .map_err(|_| "failed to encrypt wallet".to_string())?;
+    let encrypted = EncryptedWalletFile {
+        version: WALLET_VERSION,
+        address: wallet.wallet_address(),
+        public_key: hex::encode(wallet.public_key.0),
+        kdf: "argon2id".to_string(),
+        salt: hex::encode(salt),
+        nonce: hex::encode(nonce),
+        ciphertext: hex::encode(ciphertext),
+    };
+    let bytes = serde_json::to_vec_pretty(&encrypted)
+        .map_err(|error| format!("failed to serialize wallet: {error}"))?;
+    write_new_synced_file(std::path::Path::new(path), &bytes)
+}
+
+fn decrypt_wallet(encrypted: EncryptedWalletFile, pin: &str) -> Result<Wallet, String> {
+    if encrypted.version != WALLET_VERSION || encrypted.kdf != "argon2id" {
+        return Err("unsupported wallet format".to_string());
+    }
+    let salt: [u8; WALLET_SALT_LEN] = decode_wallet_array(&encrypted.salt, "salt")?;
+    let nonce: [u8; WALLET_NONCE_LEN] = decode_wallet_array(&encrypted.nonce, "nonce")?;
+    let ciphertext =
+        hex::decode(&encrypted.ciphertext).map_err(|_| "invalid wallet ciphertext".to_string())?;
+    let key = derive_wallet_key(pin, &salt)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+        .map_err(|_| "invalid encryption key".to_string())?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
+            .map_err(|_| "incorrect PIN or corrupted wallet".to_string())?,
+    );
+    let secret_key = SecretKey(
+        plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| "invalid decrypted secret key".to_string())?,
+    );
+    let wallet = Wallet::from_secret_key(secret_key);
+    if wallet.wallet_address() != encrypted.address
+        || hex::encode(wallet.public_key.0) != encrypted.public_key
+    {
+        return Err("wallet identity does not match encrypted key".to_string());
+    }
+    Ok(wallet)
+}
+
+fn derive_wallet_key(pin: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
+    let params = Params::new(64 * 1024, 3, 1, Some(32)).map_err(|error| error.to_string())?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = Zeroizing::new([0u8; 32]);
+    argon
+        .hash_password_into(pin.as_bytes(), salt, key.as_mut())
+        .map_err(|error| format!("PIN derivation failed: {error}"))?;
+    Ok(key)
+}
+
+fn new_wallet_pin() -> Result<Zeroizing<String>, String> {
+    if let Ok(pin) = env::var(WALLET_PIN_ENV) {
+        validate_wallet_pin(&pin)?;
+        return Ok(Zeroizing::new(pin));
+    }
+    let pin = Zeroizing::new(
+        rpassword::prompt_password("New wallet PIN (at least 6 digits): ")
+            .map_err(|error| format!("failed to read wallet PIN: {error}"))?,
+    );
+    validate_wallet_pin(&pin)?;
+    let confirmation = Zeroizing::new(
+        rpassword::prompt_password("Confirm wallet PIN: ")
+            .map_err(|error| format!("failed to read wallet PIN confirmation: {error}"))?,
+    );
+    if *pin != *confirmation {
+        return Err("wallet PIN confirmation does not match".to_string());
+    }
+    Ok(pin)
+}
+
+fn existing_wallet_pin() -> Result<Zeroizing<String>, String> {
+    let pin = match env::var(WALLET_PIN_ENV) {
+        Ok(pin) => pin,
+        Err(_) => rpassword::prompt_password("Wallet PIN: ")
+            .map_err(|error| format!("failed to read wallet PIN: {error}"))?,
+    };
+    validate_wallet_pin(&pin)?;
+    Ok(Zeroizing::new(pin))
+}
+
+fn validate_wallet_pin(pin: &str) -> Result<(), String> {
+    if pin.len() < 6 || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("PIN must contain at least 6 digits".to_string());
+    }
+    Ok(())
+}
+
+fn decode_wallet_array<const N: usize>(value: &str, name: &str) -> Result<[u8; N], String> {
+    hex::decode(value)
+        .map_err(|_| format!("invalid wallet {name}"))?
+        .try_into()
+        .map_err(|_| format!("invalid wallet {name} length"))
 }
 
 fn signed_transaction_to_hex(transaction: &SignedTransaction) -> Result<String, String> {
@@ -1604,8 +2290,8 @@ fn default_rpc_addr() -> String {
 }
 
 fn default_wallet_address_or_empty() -> String {
-    load_wallet(DEFAULT_WALLET_PATH)
-        .map(|wallet| wallet.wallet_address())
+    load_wallet_address(DEFAULT_WALLET_PATH)
+        .map(|address| address_to_string(&address))
         .unwrap_or_default()
 }
 
@@ -1668,20 +2354,25 @@ fn is_back(value: &str) -> bool {
 fn print_help() {
     println!(
         "\
-paqus-wallet
+wallet-cli
 
 Usage:
-  paqus-wallet
-  paqus-wallet menu
-  paqus-wallet new [wallet-path] [--show-secret]
-  paqus-wallet address <secret-key-hex>
-  paqus-wallet balance [address] [--wallet path] [--rpc host:port]
-  paqus-wallet stats [--rpc host:port]
-  paqus-wallet address-stats [address] [--wallet path] [--rpc host:port]
-  paqus-wallet hashrate [--rpc host:port]
-  paqus-wallet pay <address> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
-  paqus-wallet send <address> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
-  paqus-wallet send [--wallet path] --to <address> --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
+  wallet-cli
+  wallet-cli menu
+  wallet-cli new [wallet-path] [--show-secret]
+  wallet-cli migrate <plaintext-wallet> [encrypted-wallet]
+  wallet-cli address <secret-key-hex>
+  wallet-cli balance [address] [--wallet path] [--rpc host:port]
+  wallet-cli stats [--rpc host:port]
+  wallet-cli address-stats [address] [--wallet path] [--rpc host:port]
+  wallet-cli hashrate [--rpc host:port]
+  wallet-cli pay <address> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
+  wallet-cli send <address> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+  wallet-cli send [--wallet path] --to <address> --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
+  wallet-cli pool-payout [--ledger file] [--receipts file] [--wallet path] [--fee xpq] [--rpc host:port] [--execute]
+  wallet-cli cash withdraw <amount-xpq> [--out directory] [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+  wallet-cli cash inspect <coin.XPQ>
+  wallet-cli cash deposit <coin.XPQ> --to <address> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
 
 Defaults:
   Wallet path: wallet.json
@@ -1696,7 +2387,77 @@ mod tests {
 
     #[test]
     fn formats_xpq_with_protocol_decimals() {
-        assert_eq!(format_xpq(XPQ / 100), "0.010000 XPQ");
-        assert_eq!(format_xpq(50 * XPQ + XPQ / 100), "50.010000 XPQ");
+        assert_eq!(format_xpq(XPQ / 100), "0.01000 XPQ");
+        assert_eq!(format_xpq(50 * XPQ + XPQ / 100), "50.01000 XPQ");
+    }
+
+    #[test]
+    fn pending_cash_file_is_created_exclusively() {
+        let path = std::env::temp_dir().join(format!(
+            "wallet-cli-cash-{}-{}.XPQ.pending",
+            std::process::id(),
+            unix_timestamp().unwrap()
+        ));
+        let _ = fs::remove_file(&path);
+        write_new_synced_file(&path, b"cash recovery").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"cash recovery");
+        assert!(write_new_synced_file(&path, b"overwrite").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn encrypted_wallet_roundtrips_without_plaintext_secret() {
+        let path = std::env::temp_dir().join(format!(
+            "wallet-cli-encrypted-{}-{}.wallet.json",
+            std::process::id(),
+            unix_timestamp().unwrap()
+        ));
+        let _ = fs::remove_file(&path);
+        let wallet = Wallet::generate();
+        let secret_hex = hex::encode(wallet.secret_key.0);
+        save_encrypted_wallet(path.to_str().unwrap(), &wallet, "123456").unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("secret_key").is_none());
+        assert!(json.get("ciphertext").is_some());
+        assert!(!String::from_utf8_lossy(&bytes).contains(&secret_hex));
+
+        let encrypted: EncryptedWalletFile = serde_json::from_slice(&bytes).unwrap();
+        assert!(decrypt_wallet(encrypted, "654321").is_err());
+        let encrypted: EncryptedWalletFile = serde_json::from_slice(&bytes).unwrap();
+        let loaded = decrypt_wallet(encrypted, "123456").unwrap();
+        assert_eq!(loaded.address, wallet.address);
+        assert_eq!(loaded.public_key, wallet.public_key);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn normal_wallet_loading_rejects_legacy_plaintext() {
+        let path = std::env::temp_dir().join(format!(
+            "wallet-cli-legacy-{}-{}.json",
+            std::process::id(),
+            unix_timestamp().unwrap()
+        ));
+        let wallet = Wallet::generate();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "address": wallet.wallet_address(),
+            "secret_key": hex::encode(wallet.secret_key.0),
+        }))
+        .unwrap();
+        write_new_synced_file(&path, &bytes).unwrap();
+
+        let error = load_wallet(path.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("refusing legacy plaintext wallet"));
+        fs::remove_file(path).unwrap();
     }
 }
