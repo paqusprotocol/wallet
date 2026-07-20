@@ -3,7 +3,7 @@
 Standalone wallet CLI for Paqus. It creates wallet files, derives addresses,
 signs transactions, queries node RPC, and submits signed transactions.
 
-Version 0.2.2 targets Paqus core 0.2.7 and the current SHA3-512/ASERT network.
+Version 0.2.2 targets Paqus core 0.2.8 and the protocol-v2 SHA3-512/ASERT network.
 
 ## Quick Start
 
