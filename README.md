@@ -3,7 +3,7 @@
 Standalone wallet CLI for Paqus. It creates wallet files, derives addresses,
 signs transactions, queries node RPC, and submits signed transactions.
 
-Version 0.2.2 targets Paqus core 0.2.5 and the current SHA3-512/ASERT network.
+Version 0.2.2 targets Paqus core 0.2.7 and the current SHA3-512/ASERT network.
 
 ## Quick Start
 
@@ -94,14 +94,14 @@ cargo run -- hashrate
 Send a transaction:
 
 ```bash
-cargo run -- send <address> 10 --fee 0.01
+cargo run -- send <address> 10 --fee 0.00001
 ```
 
-`10` is `10.00 XPQ`, and `--fee 0.01` is `0.01 XPQ`. If `--fee` is omitted,
-the wallet uses the default fee of `0.01 XPQ`.
+`10` is `10.00000 XPQ`, and `--fee 0.00001` is one paqus. If `--fee` is
+omitted, the wallet uses the default fee of `0.00001 XPQ`.
 Both commands use `wallet.json` by default.
 
-Inspect an eCash bearer file without exposing its opening secret:
+Inspect a QCash bearer file without exposing its opening secret:
 
 ```bash
 cargo run -- cash inspect 100+ABC123DEF.XPQ
@@ -114,11 +114,12 @@ cargo run -- cash withdraw 1000 --out ./cash --wallet wallet.json
 ```
 
 The wallet writes crash-recovery files with the `.XPQ.pending` suffix before
-submitting the transaction. After the node accepts it, those files are renamed
-to `.XPQ`. They become usable after the protocol's 100-block withdraw maturity.
-Any fractional part remains in the on-chain account.
+submitting the transaction. Node acceptance leaves them pending. Run
+`cash sync` to promote each file to `.XPQ` only after its withdrawal is
+confirmed and reaches the 50-block QCash maturity. Any fractional part remains
+in the on-chain account.
 
-Deposit an eCash file. The wallet derives the coin spending key locally and
+Deposit a QCash file. The wallet derives the coin spending key locally and
 signs an authorization bound to the recipient address; the opening secret is
 never sent to the node:
 
@@ -126,8 +127,52 @@ never sent to the node:
 cargo run -- cash deposit 100+ABC123DEF.XPQ \
   --to <recipient-address> \
   --wallet wallet.json \
-  --fee 0.01
+  --fee 0.00001
 ```
+
+After node acceptance the wallet renames the bearer file to
+`.XPQ.deposit-pending`. Once the deposit is confirmed and reaches the 50-block
+finality boundary, `cash sync` archives it as `.XPQ.spent`; it is never silently
+deleted.
+
+Synchronize one file or every pending file in a directory:
+
+```bash
+cargo run -- cash sync ./cash
+```
+
+Lifecycle states are:
+
+```text
+.XPQ.pending -> withdraw-confirmed -> .XPQ (ready)
+.XPQ -> .XPQ.deposit-pending -> deposit-confirmed -> .XPQ.spent
+```
+
+The wallet stores a neighboring `.txid` marker while a lifecycle transition is
+pending. Keep the cash file and marker together until `cash sync` completes.
+
+List and validate every bearer file in a vault directory:
+
+```bash
+cargo run -- cash list ./cash
+```
+
+Create a new private backup directory without overwriting an existing backup:
+
+```bash
+cargo run -- cash backup ./cash ./qcash-backup-20260719
+```
+
+Recover into a new or empty cash directory:
+
+```bash
+cargo run -- cash recover ./qcash-backup-20260719 ./cash-restored
+```
+
+Backup and recovery strictly decode every QCash file, reject symbolic links,
+validate lifecycle transaction-ID markers, and refuse filename collisions.
+Backups are not encrypted: possession of an unspent `.XPQ` file is sufficient
+to claim it, so backup media must be encrypted and physically protected.
 
 Print signed transaction hex without broadcasting:
 
@@ -135,7 +180,7 @@ Print signed transaction hex without broadcasting:
 cargo run -- send \
   --to <address> \
   --amount 10 \
-  --fee 0.01
+  --fee 0.00001
 ```
 
 Broadcast the advanced form:
@@ -144,7 +189,7 @@ Broadcast the advanced form:
 cargo run -- send \
   --to <address> \
   --amount 10 \
-  --fee 0.01 \
+  --fee 0.00001 \
   --submit
 ```
 
@@ -177,7 +222,7 @@ The node must listen on an address reachable by the wallet. On a server, bind RP
 to all IPv6 interfaces with:
 
 ```bash
-full-node node run ./data/paqus --rpc-listen '[::]:6666'
+paqusd node run ./data/paqus --rpc-listen '[::]:6666'
 ```
 
 Check the server listener:
@@ -211,6 +256,13 @@ wallet-cli hashrate [--rpc host:port]
 wallet-cli pay <address> <amount-xpq> [--wallet path] [--fee xpq] [--rpc host:port]
 wallet-cli send <address> <amount-xpq> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
 wallet-cli send [--wallet path] --to <address> --amount xpq [--nonce n] [--fee xpq] [--submit] [--rpc host:port]
+wallet-cli cash withdraw <amount-xpq> [--out directory] [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+wallet-cli cash inspect <coin.XPQ>
+wallet-cli cash deposit <coin.XPQ> --to <address> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+wallet-cli cash sync <coin-file-or-directory> [--rpc host:port]
+wallet-cli cash list [cash-directory]
+wallet-cli cash backup <cash-directory> <new-backup-directory>
+wallet-cli cash recover <backup-directory> <cash-directory>
 ```
 
 Commands use `wallet.json` by default. Pass `--wallet <path>` only when you want
@@ -242,6 +294,9 @@ The menu can query these node RPC endpoints without typing `curl`:
 /accounts
 /mempool
 ```
+
+Main-menu item `6. QCash` provides interactive withdraw, deposit, inspect, and
+lifecycle synchronization without requiring command-line syntax.
 
 Inside the menu, type `b` or `back` at prompts to return to the main menu.
 RPC queries use the current session RPC address, so you do not need to enter it

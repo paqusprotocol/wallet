@@ -10,13 +10,13 @@ use paqus::{
         Address, PublicKey, SecretKey, address_from_public_key, address_from_string,
         address_to_string, derive_public_key, generate_keypair, sign,
     },
-    ecash::{
+    ledger::{BLOCK_REWARD_MATURITY, FINALITY_DEPTH, QCASH_WITHDRAW_MATURITY},
+    qcash::{
         CashCoinFile, DepositCashMetadata, WithdrawCashMetadata, cash_coin_commitment,
         decode_cash_coin_file, encode_cash_coin_file,
     },
-    ledger::{BLOCK_REWARD_MATURITY, ECASH_WITHDRAW_MATURITY},
     state::CashCoinId,
-    transaction::{EcashTransaction, SignedEcashTransaction, SignedTransaction, Transaction},
+    transaction::{QCashTransaction, SignedQCashTransaction, SignedTransaction, Transaction},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -78,15 +78,15 @@ impl Wallet {
         Ok(signed)
     }
 
-    fn sign_ecash_transaction(
+    fn sign_qcash_transaction(
         &self,
-        transaction: EcashTransaction,
-    ) -> Result<SignedEcashTransaction, String> {
+        transaction: QCashTransaction,
+    ) -> Result<SignedQCashTransaction, String> {
         let signature = sign(&self.secret_key, &transaction.signing_bytes());
-        let signed = SignedEcashTransaction::new(transaction, self.public_key, signature);
+        let signed = SignedQCashTransaction::new(transaction, self.public_key, signature);
         signed
             .validate_signed()
-            .map_err(|error| format!("signed eCash transaction failed validation: {error}"))?;
+            .map_err(|error| format!("signed QCash transaction failed validation: {error}"))?;
         Ok(signed)
     }
 }
@@ -122,7 +122,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("pay") => wallet_pay(&args[1..]),
         Some("send") => wallet_send(&args[1..]),
         Some("pool-payout") => wallet_pool_payout(&args[1..]),
-        Some("cash") | Some("ecash") => wallet_cash(&args[1..]),
+        Some("cash") | Some("qcash") => wallet_cash(&args[1..]),
         Some(command) => Err(format!("unknown wallet command `{command}`. Try --help.")),
     }
 }
@@ -136,24 +136,25 @@ fn interactive_menu() -> Result<(), String> {
         println!("3. Check wallet balance");
         println!("4. Global chain stats");
         println!("5. Send coin");
-        println!("6. RPC health");
-        println!("7. RPC status");
-        println!("8. RPC peers");
-        println!("9. RPC chain");
-        println!("10. Latest blocks");
-        println!("11. Block by height");
-        println!("12. Block by hash");
-        println!("13. Transaction by hash");
-        println!("14. Address explorer");
-        println!("15. Accounts");
-        println!("16. Mempool");
-        println!("17. Hashrate");
-        println!("18. Change RPC for this session");
-        println!("19. Exit");
+        println!("6. QCash");
+        println!("7. RPC health");
+        println!("8. RPC status");
+        println!("9. RPC peers");
+        println!("10. RPC chain");
+        println!("11. Latest blocks");
+        println!("12. Block by height");
+        println!("13. Block by hash");
+        println!("14. Transaction by hash");
+        println!("15. Address explorer");
+        println!("16. Accounts");
+        println!("17. Mempool");
+        println!("18. Hashrate");
+        println!("19. Change RPC for this session");
+        println!("20. Exit");
         println!("Type b/back to return from prompts.");
 
         let choice = prompt("Select")?;
-        if choice == "19" {
+        if choice == "20" {
             return Ok(());
         }
         match handle_menu_choice(&choice) {
@@ -204,30 +205,31 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
             return Ok(true);
         }
         "5" => return menu_send_coin(),
-        "6" => menu_rpc_get("/health")?,
-        "7" => menu_rpc_get("/status")?,
-        "8" => menu_rpc_get("/peers")?,
-        "9" => menu_rpc_get("/chain")?,
-        "10" => menu_rpc_get("/blocks/latest")?,
-        "11" => {
+        "6" => return menu_qcash(),
+        "7" => menu_rpc_get("/health")?,
+        "8" => menu_rpc_get("/status")?,
+        "9" => menu_rpc_get("/peers")?,
+        "10" => menu_rpc_get("/chain")?,
+        "11" => menu_rpc_get("/blocks/latest")?,
+        "12" => {
             let Some(height) = prompt_back("Height")? else {
                 return Ok(false);
             };
             menu_rpc_get(&format!("/blocks/{height}"))?;
         }
-        "12" => {
+        "13" => {
             let Some(hash) = prompt_back("Block hash")? else {
                 return Ok(false);
             };
             menu_rpc_get(&format!("/blocks/hash/{hash}"))?;
         }
-        "13" => {
+        "14" => {
             let Some(hash) = prompt_back("Transaction hash")? else {
                 return Ok(false);
             };
             menu_rpc_get(&format!("/tx/{hash}"))?;
         }
-        "14" => {
+        "15" => {
             let Some(address) = prompt_default_back("Address", &default_wallet_address_or_empty())?
             else {
                 return Ok(false);
@@ -238,10 +240,10 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
                 menu_rpc_get(&format!("/address/{address}"))?;
             }
         }
-        "15" => menu_rpc_get("/accounts")?,
-        "16" => menu_rpc_get("/mempool")?,
-        "17" => menu_hashrate()?,
-        "18" => {
+        "16" => menu_rpc_get("/accounts")?,
+        "17" => menu_rpc_get("/mempool")?,
+        "18" => menu_hashrate()?,
+        "19" => {
             let Some(rpc_addr) = prompt_default_back("RPC address", &default_rpc_addr())? else {
                 return Ok(false);
             };
@@ -255,6 +257,105 @@ fn handle_menu_choice(choice: &str) -> Result<bool, String> {
             println!("Unknown menu `{value}`");
             return Ok(false);
         }
+    }
+    Ok(true)
+}
+
+fn menu_qcash() -> Result<bool, String> {
+    println!("QCash");
+    println!("1. Withdraw XPQ to cash files");
+    println!("2. Deposit cash file");
+    println!("3. Inspect cash file");
+    println!("4. Sync lifecycle");
+    println!("5. List cash vault");
+    println!("6. Backup cash vault");
+    println!("7. Recover cash vault");
+    let Some(choice) = prompt_back("Select")? else {
+        return Ok(false);
+    };
+    match choice.as_str() {
+        "1" => {
+            let Some(amount) = prompt_back("Amount XPQ")? else {
+                return Ok(false);
+            };
+            let Some(output) = prompt_default_back("Cash directory", "./cash")? else {
+                return Ok(false);
+            };
+            let Some(wallet) = prompt_default_back("Wallet file", DEFAULT_WALLET_PATH)? else {
+                return Ok(false);
+            };
+            wallet_cash_withdraw(&[
+                amount,
+                "--out".into(),
+                output,
+                "--wallet".into(),
+                wallet,
+                "--rpc".into(),
+                default_rpc_addr(),
+            ])?;
+        }
+        "2" => {
+            let Some(file) = prompt_back("Cash file (.XPQ)")? else {
+                return Ok(false);
+            };
+            let Some(recipient) =
+                prompt_default_back("Recipient", &default_wallet_address_or_empty())?
+            else {
+                return Ok(false);
+            };
+            if recipient.is_empty() {
+                return Err("recipient address is required".to_string());
+            }
+            let Some(wallet) = prompt_default_back("Signing wallet", DEFAULT_WALLET_PATH)? else {
+                return Ok(false);
+            };
+            wallet_cash_deposit(&[
+                file,
+                "--to".into(),
+                recipient,
+                "--wallet".into(),
+                wallet,
+                "--rpc".into(),
+                default_rpc_addr(),
+            ])?;
+        }
+        "3" => {
+            let Some(path) = prompt_back("Cash file")? else {
+                return Ok(false);
+            };
+            wallet_cash(&["inspect".into(), path])?;
+        }
+        "4" => {
+            let Some(path) = prompt_default_back("Cash file or directory", "./cash")? else {
+                return Ok(false);
+            };
+            wallet_cash_sync(&[path, "--rpc".into(), default_rpc_addr()])?;
+        }
+        "5" => {
+            let Some(path) = prompt_default_back("Cash directory", "./cash")? else {
+                return Ok(false);
+            };
+            wallet_cash_list(&[path])?;
+        }
+        "6" => {
+            let Some(source) = prompt_default_back("Cash directory", "./cash")? else {
+                return Ok(false);
+            };
+            let Some(destination) = prompt_back("New backup directory")? else {
+                return Ok(false);
+            };
+            wallet_cash_backup(&[source, destination])?;
+        }
+        "7" => {
+            let Some(backup) = prompt_back("Backup directory")? else {
+                return Ok(false);
+            };
+            let Some(destination) = prompt_default_back("Cash directory", "./cash")? else {
+                return Ok(false);
+            };
+            wallet_cash_recover(&[backup, destination])?;
+        }
+        _ => println!("Unknown QCash selection."),
     }
     Ok(true)
 }
@@ -1539,10 +1640,16 @@ fn wallet_cash(args: &[String]) -> Result<(), String> {
         }
         Some("withdraw") => wallet_cash_withdraw(&args[1..]),
         Some("deposit") => wallet_cash_deposit(&args[1..]),
+        Some("sync") => wallet_cash_sync(&args[1..]),
+        Some("list") => wallet_cash_list(&args[1..]),
+        Some("backup") => wallet_cash_backup(&args[1..]),
+        Some("recover") => wallet_cash_recover(&args[1..]),
         Some(command) => Err(format!(
-            "unknown cash command `{command}`; use `cash withdraw`, `cash inspect`, or `cash deposit`"
+            "unknown cash command `{command}`; use withdraw, inspect, deposit, sync, list, backup, or recover"
         )),
-        None => Err("usage: cash <inspect|deposit> ...".to_string()),
+        None => {
+            Err("usage: cash <withdraw|inspect|deposit|sync|list|backup|recover> ...".to_string())
+        }
     }
 }
 
@@ -1596,7 +1703,7 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("failed to build withdraw outputs: {error}"))?;
     let wallet = load_wallet(&wallet_path)?;
     let nonce = nonce.unwrap_or(resolve_wallet_nonce(&wallet.address, &rpc_addr)?);
-    let transaction = EcashTransaction::withdraw(
+    let transaction = QCashTransaction::withdraw(
         wallet.address,
         plan.cash_amount,
         fee,
@@ -1605,7 +1712,7 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
     )
     .with_timestamp(unix_timestamp()?);
     let withdraw_hash = transaction.hash();
-    let signed = wallet.sign_ecash_transaction(transaction)?;
+    let signed = wallet.sign_qcash_transaction(transaction)?;
 
     fs::create_dir_all(&output_dir)
         .map_err(|error| format!("failed to create cash output directory {output_dir}: {error}"))?;
@@ -1625,11 +1732,17 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
                 )
             })?,
         )?;
+        write_lifecycle_hash(
+            pending_path
+                .to_str()
+                .ok_or_else(|| "cash pending path is not valid UTF-8".to_string())?,
+            &hex::encode(withdraw_hash.0),
+        )?;
         pending_files.push((pending_path, final_path));
     }
 
     let body = format!("{{\"tx\":\"{}\"}}", hex::encode(signed.to_bytes()));
-    let response = http_post_json(&rpc_addr, "/ecash/tx", &body)?;
+    let response = http_post_json(&rpc_addr, "/qcash/tx", &body)?;
     let accepted = serde_json::from_str::<serde_json::Value>(&response)
         .ok()
         .and_then(|value| value.get("accepted").and_then(serde_json::Value::as_bool))
@@ -1639,28 +1752,14 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
             "node rejected cash withdraw; recovery files remain as .XPQ.pending: {response}"
         ));
     }
-    for (pending_path, final_path) in &pending_files {
-        if final_path.exists() {
-            return Err(format!(
-                "cash file already exists; retained recovery file {}",
-                pending_path.display()
-            ));
-        }
-        fs::rename(pending_path, final_path).map_err(|error| {
-            format!(
-                "withdraw accepted but failed to finalize {}: {error}; keep the .pending file",
-                final_path.display()
-            )
-        })?;
-    }
-
     println!(
-        "{{\"accepted\":true,\"hash\":\"{}\",\"cash_amount\":{},\"remainder\":{},\"coins\":{},\"maturity_blocks\":{},\"output_dir\":\"{}\"}}",
+        "{{\"accepted\":true,\"lifecycle\":\"withdraw-pending\",\"hash\":\"{}\",\"cash_amount\":{},\"remainder\":{},\"coins\":{},\"maturity_blocks\":{},\"output_dir\":\"{}\",\"next\":\"cash sync {}\"}}",
         hex::encode(withdraw_hash.0),
         plan.cash_amount.0,
         plan.remainder.0,
         pending_files.len(),
-        ECASH_WITHDRAW_MATURITY,
+        QCASH_WITHDRAW_MATURITY,
+        output_dir,
         output_dir
     );
     Ok(())
@@ -1740,12 +1839,382 @@ fn wallet_cash_deposit(args: &[String]) -> Result<(), String> {
     let file = load_cash_coin_file(&coin_path)?;
     let metadata = DepositCashMetadata::new(&[file], recipient)
         .map_err(|error| format!("failed to authorize cash coin: {error}"))?;
-    let transaction = EcashTransaction::deposit(wallet.address, recipient, fee, nonce, metadata)
+    let transaction = QCashTransaction::deposit(wallet.address, recipient, fee, nonce, metadata)
         .with_timestamp(unix_timestamp()?);
-    let signed = wallet.sign_ecash_transaction(transaction)?;
+    let signed = wallet.sign_qcash_transaction(transaction)?;
     let body = format!("{{\"tx\":\"{}\"}}", hex::encode(signed.to_bytes()));
-    let response = http_post_json(&rpc_addr, "/ecash/tx", &body)?;
-    println!("{response}");
+    let response = http_post_json(&rpc_addr, "/qcash/tx", &body)?;
+    let value: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("invalid node response: {error}: {response}"))?;
+    if value.get("accepted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(format!(
+            "node rejected cash deposit; original file retained: {response}"
+        ));
+    }
+    let deposit_hash = value
+        .get("hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("accepted deposit response has no hash: {response}"))?;
+    let pending_path = format!("{coin_path}.deposit-pending");
+    fs::rename(&coin_path, &pending_path)
+        .map_err(|error| format!("deposit accepted but failed to mark file pending: {error}"))?;
+    if let Err(error) = write_lifecycle_hash(&pending_path, deposit_hash) {
+        let _ = fs::rename(&pending_path, &coin_path);
+        return Err(format!(
+            "deposit accepted as {deposit_hash}, but lifecycle tracking failed: {error}"
+        ));
+    }
+    println!(
+        "{{\"accepted\":true,\"lifecycle\":\"deposit-pending\",\"hash\":\"{}\",\"file\":\"{}\",\"next\":\"cash sync {}\"}}",
+        deposit_hash, pending_path, pending_path
+    );
+    Ok(())
+}
+
+fn write_lifecycle_hash(cash_path: &str, hash: &str) -> Result<(), String> {
+    let path = format!("{cash_path}.txid");
+    write_new_synced_file(std::path::Path::new(&path), hash.as_bytes())
+}
+
+fn wallet_cash_sync(args: &[String]) -> Result<(), String> {
+    let path = args
+        .first()
+        .ok_or_else(|| "usage: cash sync <coin-file-or-directory> [--rpc host:port]".to_string())?;
+    let mut rpc_addr = default_rpc_addr();
+    if let Some(index) = args
+        .iter()
+        .position(|value| value == "--rpc" || value == "--rpc-addr")
+    {
+        rpc_addr = required_option(args, index + 1, "--rpc")?;
+    }
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("failed to inspect cash lifecycle path {path}: {error}"))?;
+    let mut files = Vec::new();
+    if metadata.is_dir() {
+        for entry in
+            fs::read_dir(path).map_err(|error| format!("failed to read {path}: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
+            let value = entry.path().to_string_lossy().into_owned();
+            if value.ends_with(".XPQ.pending") || value.ends_with(".XPQ.deposit-pending") {
+                files.push(value);
+            }
+        }
+    } else {
+        files.push(path.clone());
+    }
+    let tip = status_value(&rpc_addr)?
+        .get("height")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "node status has no height".to_string())?;
+    for file_path in files {
+        sync_cash_file(&file_path, &rpc_addr, tip)?;
+    }
+    Ok(())
+}
+
+fn sync_cash_file(path: &str, rpc_addr: &str, tip: u64) -> Result<(), String> {
+    let (txid, deposit) = if path.ends_with(".XPQ.deposit-pending") {
+        let txid_path = format!("{path}.txid");
+        let txid = fs::read_to_string(&txid_path)
+            .map_err(|error| format!("failed to read {txid_path}: {error}"))?;
+        (txid.trim().to_string(), true)
+    } else if path.ends_with(".XPQ.pending") {
+        let txid_path = format!("{path}.txid");
+        let txid = fs::read_to_string(&txid_path)
+            .map_err(|error| format!("failed to read {txid_path}: {error}"))?;
+        (txid.trim().to_string(), false)
+    } else {
+        return Err(format!("cash file has no pending lifecycle state: {path}"));
+    };
+    let response = http_get(rpc_addr, &format!("/tx/{txid}"))?;
+    let tx: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("failed to parse transaction status: {error}: {response}"))?;
+    let status = tx
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let Some(height) = tx.get("block_height").and_then(serde_json::Value::as_u64) else {
+        println!("{{\"file\":\"{path}\",\"lifecycle\":\"pending\",\"tx_status\":\"{status}\"}}");
+        return Ok(());
+    };
+    if deposit {
+        let finality_height = qcash_deposit_finality_height(height);
+        if tip < finality_height {
+            println!(
+                "{{\"file\":\"{path}\",\"lifecycle\":\"deposit-confirmed\",\"block_height\":{height},\"finality_height\":{finality_height},\"tip\":{tip}}}"
+            );
+            return Ok(());
+        }
+        let spent_path = path.trim_end_matches(".deposit-pending").to_string() + ".spent";
+        fs::rename(path, &spent_path)
+            .map_err(|error| format!("failed to archive spent cash file: {error}"))?;
+        let txid_path = format!("{path}.txid");
+        fs::remove_file(&txid_path)
+            .map_err(|error| format!("failed to remove lifecycle marker {txid_path}: {error}"))?;
+        println!(
+            "{{\"file\":\"{spent_path}\",\"lifecycle\":\"spent\",\"block_height\":{height},\"finality_height\":{finality_height}}}"
+        );
+    } else {
+        let maturity_height = height.saturating_add(QCASH_WITHDRAW_MATURITY as u64);
+        if tip < maturity_height {
+            println!(
+                "{{\"file\":\"{path}\",\"lifecycle\":\"withdraw-confirmed\",\"block_height\":{height},\"maturity_height\":{maturity_height},\"tip\":{tip}}}"
+            );
+            return Ok(());
+        }
+        let ready_path = path.trim_end_matches(".pending");
+        fs::rename(path, ready_path)
+            .map_err(|error| format!("failed to promote spendable cash file: {error}"))?;
+        let txid_path = format!("{path}.txid");
+        fs::remove_file(&txid_path)
+            .map_err(|error| format!("failed to remove lifecycle marker {txid_path}: {error}"))?;
+        println!(
+            "{{\"file\":\"{ready_path}\",\"lifecycle\":\"ready\",\"maturity_height\":{maturity_height}}}"
+        );
+    }
+    Ok(())
+}
+
+fn qcash_deposit_finality_height(block_height: u64) -> u64 {
+    block_height.saturating_add(FINALITY_DEPTH as u64)
+}
+
+fn cash_lifecycle(path: &std::path::Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    if name.ends_with(".XPQ.deposit-pending") {
+        Some("deposit-pending")
+    } else if name.ends_with(".XPQ.pending") {
+        Some("withdraw-pending")
+    } else if name.ends_with(".XPQ.spent") {
+        Some("spent")
+    } else if name.ends_with(".XPQ") {
+        Some("ready")
+    } else {
+        None
+    }
+}
+
+fn cash_files_in(directory: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)
+        .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "refusing symbolic link in QCash directory: {}",
+                entry.path().display()
+            ));
+        }
+        if file_type.is_file() && cash_lifecycle(&entry.path()).is_some() {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn wallet_cash_list(args: &[String]) -> Result<(), String> {
+    let directory = std::path::Path::new(args.first().map(String::as_str).unwrap_or("./cash"));
+    let files = cash_files_in(directory)?;
+    let mut totals = std::collections::BTreeMap::<&str, (usize, u64)>::new();
+    for path in &files {
+        let file = load_cash_coin_file(
+            path.to_str()
+                .ok_or_else(|| "cash path is not valid UTF-8".to_string())?,
+        )?;
+        let lifecycle = cash_lifecycle(path).expect("filtered cash file must have lifecycle");
+        let total = totals.entry(lifecycle).or_default();
+        total.0 += 1;
+        total.1 = total.1.saturating_add(file.denomination.amount().0);
+        println!(
+            "{{\"file\":\"{}\",\"lifecycle\":\"{}\",\"coin_id\":\"{}\",\"denomination\":{}}}",
+            path.display(),
+            lifecycle,
+            hex::encode(file.coin_id),
+            file.denomination.xpq()
+        );
+    }
+    let coins: usize = totals.values().map(|(count, _)| *count).sum();
+    let value: u64 = totals.values().map(|(_, amount)| *amount).sum();
+    println!(
+        "{{\"directory\":\"{}\",\"coins\":{},\"value\":{},\"states\":{}}}",
+        directory.display(),
+        coins,
+        value,
+        serde_json::to_string(&totals).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn create_private_directory(path: &std::path::Path) -> Result<(), String> {
+    fs::create_dir(path).map_err(|error| {
+        format!(
+            "failed to create private directory {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("failed to secure {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_cash_file_exclusive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    let bytes = fs::read(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+    write_new_synced_file(destination, &bytes)
+}
+
+fn validate_lifecycle_marker(path: &std::path::Path) -> Result<(), String> {
+    let value = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read lifecycle marker {}: {error}",
+            path.display()
+        )
+    })?;
+    let bytes = hex::decode(value.trim())
+        .map_err(|_| format!("lifecycle marker {} is not hexadecimal", path.display()))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "lifecycle marker {} must contain a 32-byte transaction ID",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn wallet_cash_backup(args: &[String]) -> Result<(), String> {
+    let source = args
+        .first()
+        .ok_or_else(|| "usage: cash backup <cash-directory> <new-backup-directory>".to_string())?;
+    let destination = args
+        .get(1)
+        .ok_or_else(|| "usage: cash backup <cash-directory> <new-backup-directory>".to_string())?;
+    let source = std::path::Path::new(source);
+    let destination = std::path::Path::new(destination);
+    let files = cash_files_in(source)?;
+    if files.is_empty() {
+        return Err("cash directory contains no QCash files".to_string());
+    }
+    for path in &files {
+        load_cash_coin_file(
+            path.to_str()
+                .ok_or_else(|| "cash path is not valid UTF-8".to_string())?,
+        )?;
+        let marker = std::path::PathBuf::from(format!("{}.txid", path.display()));
+        if marker.exists() {
+            validate_lifecycle_marker(&marker)?;
+        }
+    }
+    create_private_directory(destination)?;
+    let mut copied = 0_usize;
+    for path in files {
+        let name = path
+            .file_name()
+            .ok_or_else(|| "cash file has no name".to_string())?;
+        copy_cash_file_exclusive(&path, &destination.join(name))?;
+        let marker = std::path::PathBuf::from(format!("{}.txid", path.display()));
+        if marker.exists() {
+            let marker_name = marker
+                .file_name()
+                .ok_or_else(|| "marker has no name".to_string())?;
+            copy_cash_file_exclusive(&marker, &destination.join(marker_name))?;
+        }
+        copied += 1;
+    }
+    println!(
+        "{{\"backup\":true,\"source\":\"{}\",\"destination\":\"{}\",\"coins\":{},\"warning\":\"unencrypted bearer backup\"}}",
+        source.display(),
+        destination.display(),
+        copied
+    );
+    Ok(())
+}
+
+fn wallet_cash_recover(args: &[String]) -> Result<(), String> {
+    let backup = args
+        .first()
+        .ok_or_else(|| "usage: cash recover <backup-directory> <cash-directory>".to_string())?;
+    let destination = args
+        .get(1)
+        .ok_or_else(|| "usage: cash recover <backup-directory> <cash-directory>".to_string())?;
+    let backup = std::path::Path::new(backup);
+    let destination = std::path::Path::new(destination);
+    let files = cash_files_in(backup)?;
+    if files.is_empty() {
+        return Err("backup contains no QCash files".to_string());
+    }
+    for path in &files {
+        load_cash_coin_file(
+            path.to_str()
+                .ok_or_else(|| "cash path is not valid UTF-8".to_string())?,
+        )?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| "cash file has no name".to_string())?;
+        if destination.join(name).exists() {
+            return Err(format!(
+                "recovery would overwrite existing file {}",
+                destination.join(name).display()
+            ));
+        }
+        let marker = std::path::PathBuf::from(format!("{}.txid", path.display()));
+        if marker.exists() {
+            validate_lifecycle_marker(&marker)?;
+            let marker_name = marker
+                .file_name()
+                .ok_or_else(|| "marker has no name".to_string())?;
+            if destination.join(marker_name).exists() {
+                return Err(format!(
+                    "recovery would overwrite existing marker {}",
+                    destination.join(marker_name).display()
+                ));
+            }
+        }
+    }
+    if !destination.exists() {
+        create_private_directory(destination)?;
+    } else if !destination.is_dir() {
+        return Err("cash recovery destination is not a directory".to_string());
+    }
+    let mut restored = 0_usize;
+    for path in files {
+        load_cash_coin_file(
+            path.to_str()
+                .ok_or_else(|| "cash path is not valid UTF-8".to_string())?,
+        )?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| "cash file has no name".to_string())?;
+        copy_cash_file_exclusive(&path, &destination.join(name))?;
+        let marker = std::path::PathBuf::from(format!("{}.txid", path.display()));
+        if marker.exists() {
+            validate_lifecycle_marker(&marker)?;
+            let marker_name = marker
+                .file_name()
+                .ok_or_else(|| "marker has no name".to_string())?;
+            copy_cash_file_exclusive(&marker, &destination.join(marker_name))?;
+        }
+        restored += 1;
+    }
+    println!(
+        "{{\"recovered\":true,\"backup\":\"{}\",\"destination\":\"{}\",\"coins\":{}}}",
+        backup.display(),
+        destination.display(),
+        restored
+    );
     Ok(())
 }
 
@@ -1876,11 +2345,11 @@ fn resolve_wallet_nonce(address: &Address, rpc_addr: &str) -> Result<Nonce, Stri
         .into_iter()
         .filter_map(|transaction| (transaction.from == address_hex).then_some(transaction.nonce))
         .collect::<Vec<_>>();
-    let ecash_body = http_get(rpc_addr, "/ecash/mempool")?;
-    let ecash_mempool: EcashMempoolRpcResponse = serde_json::from_str(&ecash_body)
-        .map_err(|error| format!("failed to parse eCash mempool rpc response: {error}"))?;
+    let qcash_body = http_get(rpc_addr, "/qcash/mempool")?;
+    let qcash_mempool: QCashMempoolRpcResponse = serde_json::from_str(&qcash_body)
+        .map_err(|error| format!("failed to parse QCash mempool rpc response: {error}"))?;
     pending_nonces.extend(
-        ecash_mempool
+        qcash_mempool
             .transactions
             .into_iter()
             .filter_map(|transaction| {
@@ -1918,12 +2387,12 @@ struct MempoolTxRpcResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct EcashMempoolRpcResponse {
-    transactions: Vec<EcashMempoolTxRpcResponse>,
+struct QCashMempoolRpcResponse {
+    transactions: Vec<QCashMempoolTxRpcResponse>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EcashMempoolTxRpcResponse {
+struct QCashMempoolTxRpcResponse {
     signer: String,
     nonce: u64,
 }
@@ -2392,6 +2861,10 @@ Usage:
   wallet-cli cash withdraw <amount-xpq> [--out directory] [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
   wallet-cli cash inspect <coin.XPQ>
   wallet-cli cash deposit <coin.XPQ> --to <address> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
+  wallet-cli cash sync <coin-file-or-directory> [--rpc host:port]
+  wallet-cli cash list [cash-directory]
+  wallet-cli cash backup <cash-directory> <new-backup-directory>
+  wallet-cli cash recover <backup-directory> <cash-directory>
 
 Defaults:
   Wallet path: wallet.json
@@ -2408,6 +2881,81 @@ mod tests {
     fn formats_xpq_with_protocol_decimals() {
         assert_eq!(format_xpq(XPQ / 100), "0.01000 XPQ");
         assert_eq!(format_xpq(50 * XPQ + XPQ / 100), "50.01000 XPQ");
+    }
+
+    #[test]
+    fn qcash_deposit_waits_for_hard_finality() {
+        assert_eq!(qcash_deposit_finality_height(100), 150);
+        assert!(149 < qcash_deposit_finality_height(100));
+        assert!(150 >= qcash_deposit_finality_height(100));
+    }
+
+    #[test]
+    fn classifies_qcash_file_lifecycle_suffixes() {
+        use std::path::Path;
+        assert_eq!(cash_lifecycle(Path::new("coin.XPQ")), Some("ready"));
+        assert_eq!(
+            cash_lifecycle(Path::new("coin.XPQ.pending")),
+            Some("withdraw-pending")
+        );
+        assert_eq!(
+            cash_lifecycle(Path::new("coin.XPQ.deposit-pending")),
+            Some("deposit-pending")
+        );
+        assert_eq!(cash_lifecycle(Path::new("coin.XPQ.spent")), Some("spent"));
+        assert_eq!(cash_lifecycle(Path::new("wallet.json")), None);
+    }
+
+    #[test]
+    fn qcash_backup_and_recovery_are_non_overwriting() {
+        use paqus::crypto::TransactionHash;
+        use paqus::qcash::CashDenomination;
+
+        let root = std::env::temp_dir().join(format!(
+            "wallet-cli-qcash-vault-{}-{}",
+            std::process::id(),
+            unix_timestamp().unwrap()
+        ));
+        let source = root.join("source");
+        let backup = root.join("backup");
+        let recovered = root.join("recovered");
+        fs::create_dir_all(&source).unwrap();
+
+        let secret = [42; 32];
+        let metadata = WithdrawCashMetadata::with_denominations(
+            Amount(XPQ),
+            &[CashDenomination::One],
+            &[cash_coin_commitment(&secret)],
+        )
+        .unwrap();
+        let cash =
+            CashCoinFile::new(TransactionHash([7; 32]), &metadata.outputs[0], secret).unwrap();
+        let source_file = source.join("1+TESTCOIN1.XPQ");
+        write_new_synced_file(&source_file, &encode_cash_coin_file(&cash).unwrap()).unwrap();
+
+        wallet_cash_backup(&[
+            source.to_string_lossy().into_owned(),
+            backup.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        wallet_cash_recover(&[
+            backup.to_string_lossy().into_owned(),
+            recovered.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            fs::read(&source_file).unwrap(),
+            fs::read(recovered.join("1+TESTCOIN1.XPQ")).unwrap()
+        );
+        assert!(
+            wallet_cash_recover(&[
+                backup.to_string_lossy().into_owned(),
+                recovered.to_string_lossy().into_owned(),
+            ])
+            .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

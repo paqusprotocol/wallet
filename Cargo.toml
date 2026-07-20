@@ -3,6 +3,9 @@ name = "wallet-cli"
 version = "0.2.2"
 edition = "2024"
 license = "MIT"
+description = "Command-line wallet for the Paqus blockchain"
+readme = "README.md"
+repository = "https://github.com/paqusprotocol/wallet"
 
 [dependencies]
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
@@ -14,4 +17,7 @@ rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
-paqus = { version = "=0.2.6", path = "../core" }
+paqus = { git = "https://github.com/paqusprotocol/paqus.git", rev = "9eb63eda2e863cb887dcc04e80955182bf6ec226" }
+
+[workspace]
+resolver = "3"
