@@ -30,7 +30,7 @@ const RPC_ADDR_ENV: &str = "PAQUS_RPC_ADDR";
 const DEFAULT_WALLET_PATH: &str = "wallet.json";
 const WALLET_VERSION: u8 = 1;
 const DEFAULT_TRANSACTION_FEE: u64 = XPQ / 1_000_000;
-const DEFAULT_TRANSACTION_FEE_XPQ: &str = "0.00001";
+const DEFAULT_TRANSACTION_FEE_XPQ: &str = "auto";
 const RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
@@ -368,16 +368,16 @@ fn menu_send_coin() -> Result<bool, String> {
         return Ok(false);
     };
     let rpc_addr = default_rpc_addr();
-    wallet_send_short(&[
-        to,
-        amount,
-        "--fee".to_string(),
-        fee,
-        "--wallet".to_string(),
-        wallet_path,
-        "--rpc".to_string(),
-        rpc_addr,
-    ])?;
+    let mut args = vec![to, amount];
+    if fee != "auto" {
+        args.push("--fee".to_string());
+        args.push(fee);
+    }
+    args.push("--wallet".to_string());
+    args.push(wallet_path);
+    args.push("--rpc".to_string());
+    args.push(rpc_addr);
+    wallet_send_short(&args)?;
     Ok(true)
 }
 
@@ -1383,7 +1383,7 @@ fn wallet_pay(args: &[String]) -> Result<(), String> {
             }
             "--fee" => {
                 index += 1;
-                fee = parse_amount(args.get(index), "--fee")?;
+                fee = parse_fee(args.get(index))?;
             }
             value => return Err(format!("unknown wallet pay option `{value}`")),
         }
@@ -1427,7 +1427,7 @@ fn wallet_send(args: &[String]) -> Result<(), String> {
             }
             "--fee" => {
                 index += 1;
-                fee = parse_amount(args.get(index), "--fee")?;
+                fee = parse_fee(args.get(index))?;
             }
             "--nonce" => {
                 index += 1;
@@ -1509,7 +1509,7 @@ fn wallet_pool_payout(args: &[String]) -> Result<(), String> {
             }
             "--fee" => {
                 index += 1;
-                fee = parse_amount(args.get(index), "--fee")?;
+                fee = parse_fee(args.get(index))?;
             }
             "--execute" => execute = true,
             value => return Err(format!("unknown pool-payout option `{value}`")),
@@ -1739,8 +1739,8 @@ fn wallet_cash_withdraw(args: &[String]) -> Result<(), String> {
             }
             "--fee" => {
                 index += 1;
-                fee = parse_amount(args.get(index), "--fee")?;
-                fee_explicit = true;
+                fee = parse_fee(args.get(index))?;
+                fee_explicit = fee.0 != DEFAULT_TRANSACTION_FEE;
             }
             "--nonce" => {
                 index += 1;
@@ -1886,8 +1886,8 @@ fn wallet_cash_deposit(args: &[String]) -> Result<(), String> {
             }
             "--fee" => {
                 index += 1;
-                fee = parse_amount(args.get(index), "--fee")?;
-                fee_explicit = true;
+                fee = parse_fee(args.get(index))?;
+                fee_explicit = fee.0 != DEFAULT_TRANSACTION_FEE;
             }
             "--nonce" => {
                 index += 1;
@@ -2274,7 +2274,7 @@ fn wallet_send_short(args: &[String]) -> Result<(), String> {
             }
             "--fee" => {
                 index += 1;
-                fee = parse_amount(args.get(index), "--fee")?;
+                fee = parse_fee(args.get(index))?;
             }
             "--nonce" => {
                 index += 1;
@@ -2535,6 +2535,14 @@ fn parse_address_hex(value: &str) -> Result<Address, String> {
 fn parse_amount(value: Option<&String>, flag: &str) -> Result<Amount, String> {
     let value = value.ok_or_else(|| format!("missing value for {flag}"))?;
     parse_xpq_amount(value).map_err(|error| format!("invalid XPQ amount for {flag}: {error}"))
+}
+
+fn parse_fee(value: Option<&String>) -> Result<Amount, String> {
+    let value = value.ok_or_else(|| "missing value for --fee".to_string())?;
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(Amount(DEFAULT_TRANSACTION_FEE));
+    }
+    parse_xpq_amount(value).map_err(|error| format!("invalid XPQ amount for --fee: {error}"))
 }
 
 fn parse_xpq_amount(value: &str) -> Result<Amount, String> {
