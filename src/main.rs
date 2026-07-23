@@ -755,7 +755,13 @@ fn tx_fee_rate_text(value: &serde_json::Value) -> String {
     if virtual_size == 0 {
         return "infinite".to_string();
     }
-    format!("{} paqus/vB", fee / virtual_size)
+    let whole = fee / virtual_size;
+    let fractional = fee % virtual_size;
+    if fractional == 0 {
+        return format!("{whole} paqus/vB");
+    }
+    let scaled = fractional.saturating_mul(1_000) / virtual_size;
+    format!("{whole}.{scaled:03} paqus/vB")
 }
 
 fn print_amount_field(label: &str, value: Option<&serde_json::Value>) {
