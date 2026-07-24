@@ -153,6 +153,12 @@ Sync status for one file or a directory:
 cargo run -- cash sync ./cash
 ```
 
+Track a coin by cash file name or short coin id through the node explorer:
+
+```bash
+cargo run -- cash track 100_E5D6217A74B06B8E.XPQ
+```
+
 List local cash vault:
 
 ```bash

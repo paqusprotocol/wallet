@@ -260,6 +260,7 @@ fn menu_qcash() -> Result<bool, String> {
     println!("5. List cash vault");
     println!("6. Backup cash vault");
     println!("7. Recover cash vault");
+    println!("8. Track file name on explorer");
     let Some(choice) = prompt_back("Select")? else {
         return Ok(false);
     };
@@ -344,6 +345,12 @@ fn menu_qcash() -> Result<bool, String> {
                 return Ok(false);
             };
             wallet_cash_recover(&[backup, destination])?;
+        }
+        "8" => {
+            let Some(name) = prompt_back("Cash file name or short coin id")? else {
+                return Ok(false);
+            };
+            wallet_cash_track(&[name, "--rpc".into(), default_rpc_addr()])?;
         }
         _ => println!("Unknown QCash selection."),
     }
@@ -1708,15 +1715,16 @@ fn wallet_cash(args: &[String]) -> Result<(), String> {
         Some("withdraw") => wallet_cash_withdraw(&args[1..]),
         Some("deposit") => wallet_cash_deposit(&args[1..]),
         Some("sync") => wallet_cash_sync(&args[1..]),
+        Some("track") | Some("status") => wallet_cash_track(&args[1..]),
         Some("list") => wallet_cash_list(&args[1..]),
         Some("backup") => wallet_cash_backup(&args[1..]),
         Some("recover") => wallet_cash_recover(&args[1..]),
         Some(command) => Err(format!(
-            "unknown cash command `{command}`; use withdraw, inspect, deposit, sync, list, backup, or recover"
+            "unknown cash command `{command}`; use withdraw, inspect, deposit, sync, track, list, backup, or recover"
         )),
-        None => {
-            Err("usage: cash <withdraw|inspect|deposit|sync|list|backup|recover> ...".to_string())
-        }
+        None => Err(
+            "usage: cash <withdraw|inspect|deposit|sync|track|list|backup|recover> ...".to_string(),
+        ),
     }
 }
 
@@ -2011,6 +2019,40 @@ fn sync_cash_file(path: &str, rpc_addr: &str, tip: u64) -> Result<(), String> {
         file.denomination.xpq()
     );
     Ok(())
+}
+
+fn wallet_cash_track(args: &[String]) -> Result<(), String> {
+    let lookup = args
+        .first()
+        .ok_or_else(|| "usage: cash track <file-name-or-short-id> [--rpc host:port]".to_string())?;
+    let mut rpc_addr = default_rpc_addr();
+    if let Some(index) = args
+        .iter()
+        .position(|value| value == "--rpc" || value == "--rpc-addr")
+    {
+        rpc_addr = required_option(args, index + 1, "--rpc")?;
+    }
+    let name = qcash_lookup_name(lookup)?;
+    println!("{}", http_get(&rpc_addr, &format!("/qcash/file/{name}"))?);
+    Ok(())
+}
+
+fn qcash_lookup_name(value: &str) -> Result<String, String> {
+    let name = std::path::Path::new(value)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(value)
+        .trim();
+    if name.is_empty() {
+        return Err("cash file name or short coin id is required".to_string());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return Err("cash file lookup contains unsupported characters".to_string());
+    }
+    Ok(name.to_string())
 }
 
 fn cash_lifecycle(path: &std::path::Path) -> Option<&'static str> {
@@ -2802,13 +2844,14 @@ Usage:
   wallet-cli cash inspect <coin.XPQ>
   wallet-cli cash deposit <coin.XPQ> --to <address> [--wallet path] [--nonce n] [--fee xpq] [--rpc host:port]
   wallet-cli cash sync <coin-file-or-directory> [--rpc host:port]
+  wallet-cli cash track <file-name-or-short-id> [--rpc host:port]
   wallet-cli cash list [cash-directory]
   wallet-cli cash backup <cash-directory> <new-backup-directory>
   wallet-cli cash recover <backup-directory> <cash-directory>
 
 Defaults:
   Wallet path: wallet.json
-  RPC address: $PAQUS_RPC_ADDR or [2404:8000:1044:4d8:1202:b5ff:feb0:7020]:6666
+  RPC address: $PAQUS_RPC_ADDR or [2404:8000:1044:4d8:e5c4:5b9:93bc:656d]:6666
 "
     );
 }
@@ -2954,5 +2997,18 @@ mod tests {
         let loaded = load_wallet(path.to_str().unwrap()).unwrap();
         assert_eq!(loaded.address, wallet.address);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn qcash_lookup_name_accepts_paths_and_rejects_unsafe_segments() {
+        assert_eq!(
+            qcash_lookup_name("./cash/100_E5D6217A74B06B8E.XPQ").unwrap(),
+            "100_E5D6217A74B06B8E.XPQ"
+        );
+        assert_eq!(
+            qcash_lookup_name("E5D6217A74B06B8E").unwrap(),
+            "E5D6217A74B06B8E"
+        );
+        assert!(qcash_lookup_name("bad/name?x=1").is_err());
     }
 }
