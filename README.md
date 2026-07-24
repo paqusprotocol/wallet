@@ -196,7 +196,7 @@ See [`QCASH.md`](QCASH.md) for the complete QCash lifecycle.
 By default wallet-cli uses:
 
 ```text
-127.0.0.1:6666
+[2404:8000:1044:4d8:e5c4:5b9:93bc:656d]:6666
 ```
 
 Override for one command:
@@ -208,14 +208,14 @@ cargo run -- balance --rpc 127.0.0.1:6666
 Or set an environment variable:
 
 ```bash
-export PAQUS_RPC_ADDR=127.0.0.1:6666
+export PAQUS_RPC_ADDR='[2404:8000:1044:4d8:e5c4:5b9:93bc:656d]:6666'
 cargo run -- balance
 ```
 
 For IPv6 RPC addresses, use brackets:
 
 ```bash
-export PAQUS_RPC_ADDR='[2404:8000:1044:4d8:822b:f9ff:fee2:365]:6666'
+export PAQUS_RPC_ADDR='[2404:8000:1044:4d8:e5c4:5b9:93bc:656d]:6666'
 ```
 
 Do not expose node RPC publicly unless you put it behind your own access
