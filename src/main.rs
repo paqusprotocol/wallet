@@ -2033,8 +2033,84 @@ fn wallet_cash_track(args: &[String]) -> Result<(), String> {
         rpc_addr = required_option(args, index + 1, "--rpc")?;
     }
     let name = qcash_lookup_name(lookup)?;
-    println!("{}", http_get(&rpc_addr, &format!("/qcash/file/{name}"))?);
+    let response = http_get(&rpc_addr, &format!("/qcash/file/{name}"))?;
+    print_qcash_file_lookup(&response)?;
     Ok(())
+}
+
+fn print_qcash_file_lookup(response: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(response)
+        .map_err(|error| format!("failed to parse QCash file lookup: {error}: {response}"))?;
+    let status = json_str(&value, "status").unwrap_or("unknown");
+    println!("QCash file status");
+    println!("Status        : {}", qcash_status_label(status));
+    if let Some(file_name) = json_str(&value, "file_name").or_else(|| json_str(&value, "lookup")) {
+        println!("File          : {file_name}");
+    }
+    if let Some(denomination) = value
+        .get("denomination")
+        .and_then(serde_json::Value::as_u64)
+    {
+        println!("Denomination  : {denomination} XPQ");
+    }
+    if let Some(short_id) = json_str(&value, "short_coin_id") {
+        println!("Short coin id : {short_id}");
+    } else if let Some(prefix) = json_str(&value, "coin_id_prefix") {
+        println!("Coin id prefix: {prefix}");
+    }
+    if let Some(coin_id) = json_str(&value, "coin_id") {
+        println!("Coin id       : {coin_id}");
+    }
+    if let Some(height) = value.get("height").and_then(serde_json::Value::as_u64) {
+        println!("Node height   : {height}");
+    }
+    if let Some(issued_height) = value
+        .get("issued_height")
+        .and_then(serde_json::Value::as_u64)
+    {
+        println!("Issued height : {issued_height}");
+    }
+    if let Some(maturity_height) = value
+        .get("maturity_height")
+        .and_then(serde_json::Value::as_u64)
+    {
+        println!("Maturity      : height {maturity_height}");
+    }
+    if let Some(remaining) = value
+        .get("remaining_maturity_blocks")
+        .and_then(serde_json::Value::as_u64)
+    {
+        println!("Remaining     : {remaining} block(s)");
+    }
+    if let Some(output_index) = value
+        .get("output_index")
+        .and_then(serde_json::Value::as_u64)
+    {
+        println!("Output index  : {output_index}");
+    }
+    if let Some(tx_hash) = json_str(&value, "withdraw_tx_hash") {
+        println!("Withdraw tx   : {tx_hash}");
+    }
+    if let Some(withdrawer) = json_str(&value, "withdrawer") {
+        println!("Withdrawer    : {withdrawer}");
+    }
+    if let Some(matches) = value.get("matches").and_then(serde_json::Value::as_u64) {
+        println!("Matches       : {matches}");
+    }
+    Ok(())
+}
+
+fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn qcash_status_label(status: &str) -> &'static str {
+    match status {
+        "spendable" => "spendable",
+        "pending" => "pending maturity",
+        "spent_or_unknown" => "spent or unknown",
+        _ => "unknown",
+    }
 }
 
 fn qcash_lookup_name(value: &str) -> Result<String, String> {
@@ -3010,5 +3086,12 @@ mod tests {
             "E5D6217A74B06B8E"
         );
         assert!(qcash_lookup_name("bad/name?x=1").is_err());
+    }
+
+    #[test]
+    fn qcash_status_label_formats_explorer_statuses() {
+        assert_eq!(qcash_status_label("pending"), "pending maturity");
+        assert_eq!(qcash_status_label("spendable"), "spendable");
+        assert_eq!(qcash_status_label("spent_or_unknown"), "spent or unknown");
     }
 }
